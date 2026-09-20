@@ -1583,7 +1583,10 @@ class ConfigManager:
                 )
                 packing["mode"] = (
                     AGGREGATION_MODE_ALL
-                    if all(int(value or 0) <= 0 for value in legacy_thresholds)
+                    if all(
+                        cls._parse_non_negative_int(value, 0) <= 0
+                        for value in legacy_thresholds
+                    )
                     else AGGREGATION_MODE_CONDITIONAL
                 )
             else:
