@@ -77,6 +77,13 @@ OUTPUT_MODE_FLAGS = {
     OUTPUT_MODE_RICH_ONLY: (False, True),
 }
 
+PERSONAL_PARSER_OUTPUT_DEFAULTS = {
+    "bilibili": OUTPUT_MODE_TEXT_ONLY,
+    "xianyu": OUTPUT_MODE_DISABLED,
+    "toutiao": OUTPUT_MODE_DISABLED,
+    "xiaoheihe": OUTPUT_MODE_DISABLED,
+}
+
 AGGREGATION_MODE_NONE = "不聚合"
 AGGREGATION_MODE_ALL = "全部聚合"
 AGGREGATION_MODE_CONDITIONAL = "按条件聚合"
@@ -198,7 +205,7 @@ def _get_astrbot_plugin_cache_dir() -> str:
 
 @dataclass
 class TriggerConfig:
-    auto_parse: bool = True
+    auto_parse: bool = False
     keywords: List[str] = field(default_factory=lambda: ["视频解析", "解析视频"])
     reply_trigger: bool = False
 
@@ -263,18 +270,18 @@ class ParserOutputConfig:
 
 @dataclass
 class OpeningMessageConfig:
-    enabled: bool = True
+    enabled: bool = False
     content: str = Config.DEFAULT_OPENING_CONTENT
     archive_content: str = Config.DEFAULT_ARCHIVE_OPENING_CONTENT
 
 
 @dataclass
 class AggregationConfig:
-    mode: str = AGGREGATION_MODE_NONE
-    image_threshold: int = 3
+    mode: str = AGGREGATION_MODE_CONDITIONAL
+    image_threshold: int = 4
     video_threshold: int = 2
-    node_threshold: int = 5
-    text_length_threshold: int = 0
+    node_threshold: int = 0
+    text_length_threshold: int = 100
 
     def should_aggregate_nodes(
         self,
@@ -313,13 +320,13 @@ class MediaDisplayConfig:
 
 @dataclass
 class TextMetadataConfig:
-    show_title: bool = True
+    show_title: bool = False
     show_author: bool = True
-    show_timestamp: bool = True
-    show_original_link: bool = True
+    show_timestamp: bool = False
+    show_original_link: bool = False
     show_description: bool = True
-    show_video_size: bool = True
-    max_description_length: int = 0
+    show_video_size: bool = False
+    max_description_length: int = 300
     hide_redundant_twitter_title: bool = True
     hide_duplicate_title_author: bool = True
     quote_user_message: bool = False
@@ -357,8 +364,8 @@ class MessageConfig:
     text_metadata: TextMetadataConfig = field(default_factory=TextMetadataConfig)
     hot_comments: HotCommentConfig = field(default_factory=HotCommentConfig)
     forward_sender_name: str = "视频解析bot"
-    forward_chunk_size: int = 8
-    direct_image_batch_size: int = 4
+    forward_chunk_size: int = 0
+    direct_image_batch_size: int = 0
     video_pack_threshold: int = 0
 
 
@@ -577,8 +584,8 @@ class ConfigManager:
             }
         self.trigger = TriggerConfig(
             auto_parse=self._parse_bool(
-                trigger_raw.get("auto_parse", True),
-                True,
+                trigger_raw.get("auto_parse", False),
+                False,
                 "trigger.auto_parse",
             ),
             keywords=self._normalize_string_list(
@@ -647,8 +654,8 @@ class ConfigManager:
         self.message = MessageConfig(
             opening=OpeningMessageConfig(
                 enabled=self._parse_bool(
-                    opening.get("enable", True),
-                    True,
+                    opening.get("enable", False),
+                    False,
                     "message.opening.enable",
                 ),
                 content=str(
@@ -668,19 +675,19 @@ class ConfigManager:
             ),
             aggregation=AggregationConfig(
                 mode=self._parse_aggregation_mode(
-                    aggregation.get("mode", AGGREGATION_MODE_NONE)
+                    aggregation.get("mode", AGGREGATION_MODE_CONDITIONAL)
                 ),
                 image_threshold=self._parse_non_negative_int(
-                    aggregation_thresholds.get("image_count", 3), 3
+                    aggregation_thresholds.get("image_count", 4), 4
                 ),
                 video_threshold=self._parse_non_negative_int(
                     aggregation_thresholds.get("video_count", 2), 2
                 ),
                 node_threshold=self._parse_non_negative_int(
-                    aggregation_thresholds.get("node_count", 5), 5
+                    aggregation_thresholds.get("node_count", 0), 0
                 ),
                 text_length_threshold=self._parse_non_negative_int(
-                    aggregation_thresholds.get("text_length", 0), 0
+                    aggregation_thresholds.get("text_length", 100), 100
                 ),
             ),
             archive=ArchiveConfig(
@@ -705,8 +712,8 @@ class ConfigManager:
             ),
             text_metadata=TextMetadataConfig(
                 show_title=self._parse_bool(
-                    text_metadata.get("show_title", True),
-                    True,
+                    text_metadata.get("show_title", False),
+                    False,
                     "message.text_metadata.show_title",
                 ),
                 show_author=self._parse_bool(
@@ -715,13 +722,13 @@ class ConfigManager:
                     "message.text_metadata.show_author",
                 ),
                 show_timestamp=self._parse_bool(
-                    text_metadata.get("show_timestamp", True),
-                    True,
+                    text_metadata.get("show_timestamp", False),
+                    False,
                     "message.text_metadata.show_timestamp",
                 ),
                 show_original_link=self._parse_bool(
-                    text_metadata.get("show_original_link", True),
-                    True,
+                    text_metadata.get("show_original_link", False),
+                    False,
                     "message.text_metadata.show_original_link",
                 ),
                 show_description=self._parse_bool(
@@ -730,12 +737,12 @@ class ConfigManager:
                     "message.text_metadata.show_description",
                 ),
                 show_video_size=self._parse_bool(
-                    text_metadata.get("show_video_size", True),
-                    True,
+                    text_metadata.get("show_video_size", False),
+                    False,
                     "message.text_metadata.show_video_size",
                 ),
                 max_description_length=self._parse_non_negative_int(
-                    text_metadata.get("max_description_length", 0), 0
+                    text_metadata.get("max_description_length", 300), 300
                 ),
                 hide_redundant_twitter_title=self._parse_bool(
                     text_metadata.get("hide_redundant_twitter_title", True),
@@ -781,13 +788,13 @@ class ConfigManager:
             forward_chunk_size=min(
                 100,
                 self._parse_non_negative_int(
-                    message_raw.get("forward_chunk_size", 8), 8
+                    message_raw.get("forward_chunk_size", 0), 0
                 ),
             ),
             direct_image_batch_size=min(
                 100,
                 self._parse_non_negative_int(
-                    message_raw.get("direct_image_batch_size", 4), 4
+                    message_raw.get("direct_image_batch_size", 0), 0
                 ),
             ),
             video_pack_threshold=min(
@@ -879,7 +886,7 @@ class ConfigManager:
                 dedup_raw.get("competitor_bot_ids", [])
             ),
             wait_seconds=self._parse_non_negative_float(
-                dedup_raw.get("wait_seconds", 2.0), 2.0
+                dedup_raw.get("wait_seconds", 3.0), 3.0
             ),
             url_cooldown_seconds=self._parse_non_negative_float(
                 dedup_raw.get("url_cooldown_seconds", 120.0), 120.0
@@ -1359,7 +1366,7 @@ class ConfigManager:
 
         normalized: Dict[str, str] = {}
         valid_modes = set(OUTPUT_MODE_FLAGS)
-        missing_mode = OUTPUT_MODE_ALL
+        missing_mode: Optional[str] = None
         known_values = [values[key] for key in PARSER_OUTPUT_KEYS if key in values]
         if len(known_values) >= len(PARSER_OUTPUT_KEYS) - 1 and all(
             str(raw_mode or "").strip() == OUTPUT_MODE_DISABLED
@@ -1369,7 +1376,11 @@ class ConfigManager:
             missing_mode = OUTPUT_MODE_DISABLED
         for key in PARSER_OUTPUT_KEYS:
             if key not in values:
-                normalized[key] = missing_mode
+                normalized[key] = (
+                    missing_mode
+                    if missing_mode is not None
+                    else PERSONAL_PARSER_OUTPUT_DEFAULTS.get(key, OUTPUT_MODE_ALL)
+                )
                 continue
             raw_mode = values.get(key)
             mode = str(raw_mode).strip() if raw_mode is not None else ""
