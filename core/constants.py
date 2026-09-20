@@ -27,7 +27,7 @@ class Config:
     DOWNLOAD_MANAGER_MAX_CONCURRENT = 5
     PARSER_MAX_CONCURRENT = 10
     
-    PLUGIN_NAME = "astrbot_plugin_media_parser"
+    PLUGIN_NAME = "mod_astrbot_plugin_media_parser"
     CACHE_DIR_NAME = "cache"
     RUNTIME_DIR_NAME = "runtime_manager"
     DEFAULT_CACHE_DIR = "/app/sharedFolder/video_parser/cache"
