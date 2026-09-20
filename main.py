@@ -15,7 +15,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.core.star.filter.event_message_type import EventMessageType
 
 from .core.parser import ParserManager
-from .core.parser.utils import extract_url_from_card_data
+from .core.parser.utils import extract_url_from_card_data, is_bilibili_url
 from .core.downloader import DownloadManager
 from .core.storage import (
     cleanup_expired_marked_in,
@@ -46,13 +46,14 @@ from .core.message_adapter.archive_builder import (
 from .core.translation import MetadataTranslator
 from .core.config_manager import ConfigManager
 from .core.interaction.platform.bilibili import BilibiliAdminCookieAssistManager
+from .core.output_policy import apply_override, parse_output_override
 
 
 @register(
-    "astrbot_plugin_media_parser",
+    "mod_astrbot_plugin_media_parser",
     "drdon1234",
-    "聚合解析流媒体平台链接，转换为媒体直链发送",
-    "1.6.1",
+    "聚合解析流媒体平台链接，转换为媒体直链发送（个人增强版）",
+    "1.6.1-personal.1",
 )
 class VideoParserPlugin(Star):
     def __init__(self, context: Context, config: dict):
@@ -321,13 +322,14 @@ class VideoParserPlugin(Star):
             for field_name, metadata_key in candidates
         )
 
-    def _filter_links_by_output(self, links_with_parser):
+    def _filter_links_by_output(self, links_with_parser, output_override=None):
         """过滤掉当前配置下不会产生任何输出的控制器链接。"""
         cfg = self.config_manager
         filtered = []
         for link, parser in links_with_parser:
             parser_name = getattr(parser, "name", "")
-            if cfg.parser_output.controller_has_any_output(parser_name):
+            default_flags = cfg.parser_output.output_for_controller(parser_name)
+            if any(apply_override(default_flags, output_override)):
                 filtered.append((link, parser))
             elif cfg.admin.debug_mode:
                 self.logger.debug(
@@ -335,16 +337,37 @@ class VideoParserPlugin(Star):
                 )
         return filtered
 
-    def _apply_output_flags(self, metadata_list) -> None:
-        """将每条解析结果的有效输出开关写入 metadata。"""
+    def _apply_output_flags(self, metadata_list, output_override=None) -> None:
+        """将每条解析结果的有效输出和个人显示策略写入 metadata。"""
+        cfg = self.config_manager
         for metadata in metadata_list:
-            text_enabled, rich_enabled = (
-                self.config_manager.parser_output.output_for_metadata(metadata)
+            text_enabled, rich_enabled = cfg.parser_output.output_for_metadata(metadata)
+            text_enabled, rich_enabled = apply_override(
+                (text_enabled, rich_enabled),
+                output_override,
             )
+
+            parser_name = str(
+                metadata.get("parser_name") or metadata.get("platform") or ""
+            ).strip()
+            metadata["_video_cover_only"] = False
+            if parser_name == "bilibili":
+                if cfg.bilibili.video_output_mode == "metadata":
+                    rich_enabled = False
+                elif cfg.bilibili.video_output_mode == "cover":
+                    metadata["_video_cover_only"] = True
+
             metadata["_enable_text_metadata"] = text_enabled
             metadata["_enable_rich_media"] = rich_enabled
-            metadata["_text_metadata_fields"] = (
-                self.config_manager.message.text_metadata.visibility()
+            metadata["_text_metadata_fields"] = cfg.message.text_metadata.visibility()
+            metadata["_max_description_length"] = (
+                cfg.message.text_metadata.max_description_length
+            )
+            metadata["_hide_redundant_twitter_title"] = (
+                cfg.message.text_metadata.hide_redundant_twitter_title
+            )
+            metadata["_hide_duplicate_title_author"] = (
+                cfg.message.text_metadata.hide_duplicate_title_author
             )
 
     @staticmethod
@@ -579,7 +602,15 @@ class VideoParserPlugin(Star):
                             metadata,
                             proxy_addr=cfg.proxy.address,
                             on_sendable_media=send_opening_once,
-                            video_cover_only=(False if zip_requested else None),
+                            video_cover_only=(
+                                False
+                                if zip_requested
+                                else (
+                                    True
+                                    if metadata.get("_video_cover_only")
+                                    else None
+                                )
+                            ),
                         )
                     except asyncio.CancelledError:
                         raise
@@ -861,7 +892,16 @@ class VideoParserPlugin(Star):
             return
 
         original_message_text = event.message_str or ""
-        parse_text = original_message_text
+        output_override = parse_output_override(original_message_text)
+        parse_text = (
+            output_override.cleaned_text
+            if output_override.mode
+            else original_message_text
+        )
+        if cfg.admin.debug_mode and output_override.mode:
+            self.logger.debug(
+                f"检测到单条消息输出覆盖: mode={output_override.mode}"
+            )
         quote_source_message_id = str(
             getattr(event.message_obj, "message_id", "") or ""
         ).strip()
@@ -887,10 +927,17 @@ class VideoParserPlugin(Star):
             return
 
         card_urls = self._extract_urls_from_json_cards(event)
+        if card_urls and cfg.bilibili.skip_qq_card_parse:
+            skipped_bili_cards = [url for url in card_urls if is_bilibili_url(url)]
+            card_urls = [url for url in card_urls if not is_bilibili_url(url)]
+            if skipped_bili_cards and cfg.admin.debug_mode:
+                self.logger.debug(
+                    f"[media_parser] 跳过B站QQ卡片解析: {skipped_bili_cards}"
+                )
         if card_urls:
             if cfg.admin.debug_mode:
                 self.logger.debug(f"[media_parser] 从JSON卡片提取到链接: {card_urls}")
-            parse_text = "\n".join([original_message_text, *card_urls])
+            parse_text = "\n".join([parse_text, *card_urls])
 
         zip_command = cfg.message.archive.command
         zip_requested = bool(
@@ -900,7 +947,7 @@ class VideoParserPlugin(Star):
             links_with_parser, reply_message_id = self._try_extract_reply_links(event)
             if reply_message_id:
                 quote_source_message_id = reply_message_id
-            links_with_parser = self._filter_links_by_output(links_with_parser)
+            links_with_parser = self._filter_links_by_output(links_with_parser, output_override)
             if not links_with_parser:
                 await event.send(
                     event.plain_result("请引用包含可解析链接的消息后再发送归档命令。")
@@ -910,7 +957,7 @@ class VideoParserPlugin(Star):
             links_with_parser = self.parser_manager.extract_all_links(parse_text)
             found_direct_links = bool(links_with_parser)
             if found_direct_links:
-                links_with_parser = self._filter_links_by_output(links_with_parser)
+                links_with_parser = self._filter_links_by_output(links_with_parser, output_override)
                 if not links_with_parser:
                     return
 
@@ -923,7 +970,7 @@ class VideoParserPlugin(Star):
                     )
                     if reply_message_id:
                         quote_source_message_id = reply_message_id
-                    links_with_parser = self._filter_links_by_output(links_with_parser)
+                    links_with_parser = self._filter_links_by_output(links_with_parser, output_override)
                     if links_with_parser and cfg.admin.debug_mode:
                         self.logger.debug(
                             f"通过回复触发解析，提取到 {len(links_with_parser)} 个链接"
@@ -993,12 +1040,13 @@ class VideoParserPlugin(Star):
                         event.plain_result("引用消息中的链接未获得可归档解析结果。")
                     )
                 return
-            self._apply_output_flags(metadata_list)
+            self._apply_output_flags(metadata_list, output_override)
             if zip_requested:
                 # 归档是独立导出能力，不继承聊天展示的仅文本/仅媒体开关。
                 for metadata in metadata_list:
                     metadata["_enable_text_metadata"] = True
                     metadata["_enable_rich_media"] = True
+                    metadata["_video_cover_only"] = False
                     metadata["_text_metadata_fields"] = {
                         "title": True,
                         "author": True,
