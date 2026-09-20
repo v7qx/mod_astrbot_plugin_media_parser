@@ -1,6 +1,6 @@
-name: astrbot_plugin_media_parser
-desc: 聚合解析流媒体平台链接，转换为媒体直链发送
-version: 1.6.1
+name: mod_astrbot_plugin_media_parser
+desc: 聚合解析流媒体平台链接，转换为媒体直链发送（个人增强版）
+version: 1.6.1-personal.1
 astrbot_version: ">=4,<5"
 author: drdon1234
-repo: https://github.com/drdon1234/astrbot_plugin_media_parser
+repo: https://github.com/v7qx/mod_astrbot_plugin_media_parser/tree/personal

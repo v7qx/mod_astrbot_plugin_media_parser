@@ -180,21 +180,55 @@ def build_text_node(
         return Plain(text)
 
     text_parts = []
+    title_text = str(metadata.get("title") or "").strip()
+    author_text = str(metadata.get("author") or "").strip()
+    source_url = str(metadata.get("url") or metadata.get("source_url") or "").lower()
+    platform = str(
+        metadata.get("platform") or metadata.get("parser_name") or ""
+    ).lower()
+
+    if (
+        metadata.get("_hide_redundant_twitter_title", True)
+        and title_text.endswith(" 的推文")
+        and (
+            "twitter" in platform
+            or platform == "x"
+            or "x.com" in source_url
+            or "twitter.com" in source_url
+        )
+    ):
+        title_text = ""
+    if (
+        metadata.get("_hide_duplicate_title_author", True)
+        and title_text
+        and author_text
+        and title_text == author_text
+    ):
+        title_text = ""
+
     desc_text = (
         str(metadata.get("desc") or "").strip()
         if text_metadata_field_enabled(metadata, "description")
         else ""
     )
+    try:
+        max_desc_length = max(
+            0, int(metadata.get("_max_description_length", 0) or 0)
+        )
+    except (TypeError, ValueError):
+        max_desc_length = 0
+    if max_desc_length and len(desc_text) > max_desc_length:
+        desc_text = desc_text[:max_desc_length].rstrip() + "..."
 
-    if text_metadata_field_enabled(metadata, "title") and metadata.get("title"):
-        text_parts.append(f"标题：{metadata['title']}")
-    if text_metadata_field_enabled(metadata, "author") and metadata.get("author"):
-        text_parts.append(f"作者：{metadata['author']}")
+    if text_metadata_field_enabled(metadata, "title") and title_text:
+        text_parts.append(f"标题：{title_text}")
+    if text_metadata_field_enabled(metadata, "author") and author_text:
+        text_parts.append(f"作者：{author_text}")
     if text_metadata_field_enabled(metadata, "timestamp") and metadata.get("timestamp"):
         text_parts.append(f"发布时间：{metadata['timestamp']}")
 
     video_count = metadata.get("video_count", 0)
-    if video_count > 0:
+    if video_count > 0 and text_metadata_field_enabled(metadata, "video_size"):
         actual_max_video_size_mb = metadata.get("largest_video_size_mb")
         total_video_size_mb = metadata.get("total_video_size_mb", 0.0)
         video_modes = metadata.get("video_modes")
@@ -329,7 +363,8 @@ def build_hot_comments_node(
             likes = 0
         time_text = str(item.get("time", "") or "").strip() or "-"
         message = str(item.get("message", "") or "").strip() or "（无文本内容）"
-        user_label = f"{username}(uid:{uid})" if uid else username
+        show_uid = bool(metadata.get("_show_uid", True))
+        user_label = f"{username}(uid:{uid})" if uid and show_uid else username
         text_parts.append(f"[{idx}] {user_label}")
         text_parts.append(f"点赞: {likes} | 时间: {time_text}")
         text_parts.append(message)
@@ -627,6 +662,7 @@ def summarize_node_counts(
     image_count = 0
     video_count = 0
     node_count = 0
+    text_length = 0
 
     for link_nodes in all_link_nodes:
         for node in link_nodes:
@@ -637,11 +673,14 @@ def summarize_node_counts(
                 image_count += 1
             elif isinstance(node, Video):
                 video_count += 1
+            elif isinstance(node, Plain):
+                text_length += len(str(node.text or ""))
 
     return {
         "image_count": image_count,
         "video_count": video_count,
         "node_count": node_count,
+        "text_length": text_length,
     }
 
 
@@ -730,6 +769,7 @@ def build_all_nodes(
             link_metadata.append(
                 LinkBuildMeta(
                     metadata_index=idx,
+                    metadata=metadata,
                     link_nodes=link_nodes,
                     is_large_media=is_large_media,
                     is_normal=not is_large_media,

@@ -49,6 +49,11 @@ class MediaMetadata(TypedDict, total=False):
     _enable_text_metadata: bool
     _enable_rich_media: bool
     _text_metadata_fields: Dict[str, bool]
+    _max_description_length: int
+    _hide_redundant_twitter_title: bool
+    _hide_duplicate_title_author: bool
+    _show_uid: bool
+    _video_cover_only: bool
     translation_target_language: str
     _translated_fields: Dict[str, str]
 
@@ -84,6 +89,7 @@ class MediaMetadata(TypedDict, total=False):
 class LinkBuildMeta(TypedDict):
     """node_builder 为每条链接构建的辅助元数据，用于发送阶段。"""
     metadata_index: int
+    metadata: MediaMetadata
     link_nodes: List[Any]
     is_large_media: bool
     is_normal: bool

@@ -77,6 +77,13 @@ OUTPUT_MODE_FLAGS = {
     OUTPUT_MODE_RICH_ONLY: (False, True),
 }
 
+PERSONAL_PARSER_OUTPUT_DEFAULTS = {
+    "bilibili": OUTPUT_MODE_TEXT_ONLY,
+    "xianyu": OUTPUT_MODE_DISABLED,
+    "toutiao": OUTPUT_MODE_DISABLED,
+    "xiaoheihe": OUTPUT_MODE_DISABLED,
+}
+
 AGGREGATION_MODE_NONE = "不聚合"
 AGGREGATION_MODE_ALL = "全部聚合"
 AGGREGATION_MODE_CONDITIONAL = "按条件聚合"
@@ -198,7 +205,7 @@ def _get_astrbot_plugin_cache_dir() -> str:
 
 @dataclass
 class TriggerConfig:
-    auto_parse: bool = True
+    auto_parse: bool = False
     keywords: List[str] = field(default_factory=lambda: ["视频解析", "解析视频"])
     reply_trigger: bool = False
 
@@ -263,23 +270,25 @@ class ParserOutputConfig:
 
 @dataclass
 class OpeningMessageConfig:
-    enabled: bool = True
+    enabled: bool = False
     content: str = Config.DEFAULT_OPENING_CONTENT
     archive_content: str = Config.DEFAULT_ARCHIVE_OPENING_CONTENT
 
 
 @dataclass
 class AggregationConfig:
-    mode: str = AGGREGATION_MODE_NONE
-    image_threshold: int = 3
+    mode: str = AGGREGATION_MODE_CONDITIONAL
+    image_threshold: int = 4
     video_threshold: int = 2
-    node_threshold: int = 5
+    node_threshold: int = 0
+    text_length_threshold: int = 100
 
     def should_aggregate_nodes(
         self,
         image_count: int,
         video_count: int,
         node_count: int,
+        text_length: int = 0,
     ) -> bool:
         """根据聚合模式和实际节点数量判断是否发送合并转发消息。"""
         if self.mode == AGGREGATION_MODE_ALL:
@@ -291,6 +300,7 @@ class AggregationConfig:
             (self.image_threshold, image_count),
             (self.video_threshold, video_count),
             (self.node_threshold, node_count),
+            (self.text_length_threshold, text_length),
         )
         return any(
             threshold > 0 and count >= threshold for threshold, count in thresholds
@@ -310,11 +320,15 @@ class MediaDisplayConfig:
 
 @dataclass
 class TextMetadataConfig:
-    show_title: bool = True
+    show_title: bool = False
     show_author: bool = True
-    show_timestamp: bool = True
-    show_original_link: bool = True
+    show_timestamp: bool = False
+    show_original_link: bool = False
     show_description: bool = True
+    show_video_size: bool = False
+    max_description_length: int = 300
+    hide_redundant_twitter_title: bool = True
+    hide_duplicate_title_author: bool = True
     quote_user_message: bool = False
     render_to_image: bool = False
     render_style: str = "fresh"
@@ -329,6 +343,7 @@ class TextMetadataConfig:
             "timestamp": self.show_timestamp,
             "original_link": self.show_original_link,
             "description": self.show_description,
+            "video_size": self.show_video_size,
         }
 
 
@@ -348,6 +363,10 @@ class MessageConfig:
     media_display: MediaDisplayConfig = field(default_factory=MediaDisplayConfig)
     text_metadata: TextMetadataConfig = field(default_factory=TextMetadataConfig)
     hot_comments: HotCommentConfig = field(default_factory=HotCommentConfig)
+    forward_sender_name: str = "视频解析bot"
+    forward_chunk_size: int = 0
+    direct_image_batch_size: int = 0
+    video_pack_threshold: int = 0
 
 
 @dataclass
@@ -393,6 +412,16 @@ class PermissionConfig:
             allowed = not self.whitelist_enable
 
         return allowed
+
+
+@dataclass
+class DedupConfig:
+    enable: bool = False
+    group: List[str] = field(default_factory=list)
+    competitor_bot_ids: List[str] = field(default_factory=list)
+    wait_seconds: float = 2.0
+    url_cooldown_seconds: float = 120.0
+    ignore_competitor_messages: bool = True
 
 
 @dataclass
@@ -465,6 +494,9 @@ class BilibiliEnhancedConfig:
     admin_reply_timeout_minutes: int = 1440
     admin_request_cooldown_minutes: int = 1440
     admin_cookie_update_command: str = "B站更新Cookie"
+    skip_qq_card_parse: bool = True
+    video_output_mode: str = "video"
+    show_uid: bool = True
 
 
 @dataclass
@@ -552,8 +584,8 @@ class ConfigManager:
             }
         self.trigger = TriggerConfig(
             auto_parse=self._parse_bool(
-                trigger_raw.get("auto_parse", True),
-                True,
+                trigger_raw.get("auto_parse", False),
+                False,
                 "trigger.auto_parse",
             ),
             keywords=self._normalize_string_list(
@@ -622,8 +654,8 @@ class ConfigManager:
         self.message = MessageConfig(
             opening=OpeningMessageConfig(
                 enabled=self._parse_bool(
-                    opening.get("enable", True),
-                    True,
+                    opening.get("enable", False),
+                    False,
                     "message.opening.enable",
                 ),
                 content=str(
@@ -643,16 +675,19 @@ class ConfigManager:
             ),
             aggregation=AggregationConfig(
                 mode=self._parse_aggregation_mode(
-                    aggregation.get("mode", AGGREGATION_MODE_NONE)
+                    aggregation.get("mode", AGGREGATION_MODE_CONDITIONAL)
                 ),
                 image_threshold=self._parse_non_negative_int(
-                    aggregation_thresholds.get("image_count", 3), 3
+                    aggregation_thresholds.get("image_count", 4), 4
                 ),
                 video_threshold=self._parse_non_negative_int(
                     aggregation_thresholds.get("video_count", 2), 2
                 ),
                 node_threshold=self._parse_non_negative_int(
-                    aggregation_thresholds.get("node_count", 5), 5
+                    aggregation_thresholds.get("node_count", 0), 0
+                ),
+                text_length_threshold=self._parse_non_negative_int(
+                    aggregation_thresholds.get("text_length", 100), 100
                 ),
             ),
             archive=ArchiveConfig(
@@ -677,8 +712,8 @@ class ConfigManager:
             ),
             text_metadata=TextMetadataConfig(
                 show_title=self._parse_bool(
-                    text_metadata.get("show_title", True),
-                    True,
+                    text_metadata.get("show_title", False),
+                    False,
                     "message.text_metadata.show_title",
                 ),
                 show_author=self._parse_bool(
@@ -687,19 +722,37 @@ class ConfigManager:
                     "message.text_metadata.show_author",
                 ),
                 show_timestamp=self._parse_bool(
-                    text_metadata.get("show_timestamp", True),
-                    True,
+                    text_metadata.get("show_timestamp", False),
+                    False,
                     "message.text_metadata.show_timestamp",
                 ),
                 show_original_link=self._parse_bool(
-                    text_metadata.get("show_original_link", True),
-                    True,
+                    text_metadata.get("show_original_link", False),
+                    False,
                     "message.text_metadata.show_original_link",
                 ),
                 show_description=self._parse_bool(
                     text_metadata.get("show_description", True),
                     True,
                     "message.text_metadata.show_description",
+                ),
+                show_video_size=self._parse_bool(
+                    text_metadata.get("show_video_size", False),
+                    False,
+                    "message.text_metadata.show_video_size",
+                ),
+                max_description_length=self._parse_non_negative_int(
+                    text_metadata.get("max_description_length", 300), 300
+                ),
+                hide_redundant_twitter_title=self._parse_bool(
+                    text_metadata.get("hide_redundant_twitter_title", True),
+                    True,
+                    "message.text_metadata.hide_redundant_twitter_title",
+                ),
+                hide_duplicate_title_author=self._parse_bool(
+                    text_metadata.get("hide_duplicate_title_author", True),
+                    True,
+                    "message.text_metadata.hide_duplicate_title_author",
                 ),
                 quote_user_message=self._parse_bool(
                     text_metadata.get("quote_user_message", False),
@@ -726,6 +779,28 @@ class ConfigManager:
                             24,
                         ),
                     ),
+                ),
+            ),
+            forward_sender_name=str(
+                message_raw.get("forward_sender_name", "视频解析bot")
+                or "视频解析bot"
+            ).strip(),
+            forward_chunk_size=min(
+                100,
+                self._parse_non_negative_int(
+                    message_raw.get("forward_chunk_size", 0), 0
+                ),
+            ),
+            direct_image_batch_size=min(
+                100,
+                self._parse_non_negative_int(
+                    message_raw.get("direct_image_batch_size", 0), 0
+                ),
+            ),
+            video_pack_threshold=min(
+                100,
+                self._parse_non_negative_int(
+                    message_raw.get("video_pack_threshold", 0), 0
                 ),
             ),
             hot_comments=HotCommentConfig(
@@ -796,6 +871,31 @@ class ConfigManager:
             ),
             blacklist_user=self._normalize_id_list(blacklist.get("user", [])),
             blacklist_group=self._normalize_id_list(blacklist.get("group", [])),
+        )
+
+        # --- dedup / multi-bot coexistence ---
+        dedup_raw = self._as_dict(config.get("dedup"))
+        self.dedup = DedupConfig(
+            enable=self._parse_bool(
+                dedup_raw.get("enable", False),
+                False,
+                "dedup.enable",
+            ),
+            group=self._normalize_id_list(dedup_raw.get("group", [])),
+            competitor_bot_ids=self._normalize_id_list(
+                dedup_raw.get("competitor_bot_ids", [])
+            ),
+            wait_seconds=self._parse_non_negative_float(
+                dedup_raw.get("wait_seconds", 3.0), 3.0
+            ),
+            url_cooldown_seconds=self._parse_non_negative_float(
+                dedup_raw.get("url_cooldown_seconds", 120.0), 120.0
+            ),
+            ignore_competitor_messages=self._parse_bool(
+                dedup_raw.get("ignore_competitor_messages", True),
+                True,
+                "dedup.ignore_competitor_messages",
+            ),
         )
 
         # --- download ---
@@ -1009,6 +1109,19 @@ class ConfigManager:
             admin_reply_timeout_minutes=admin_reply_timeout,
             admin_request_cooldown_minutes=admin_request_cooldown,
             admin_cookie_update_command=admin_cookie_update_command,
+            skip_qq_card_parse=self._parse_bool(
+                bili.get("skip_qq_card_parse", True),
+                True,
+                "bilibili_enhanced.skip_qq_card_parse",
+            ),
+            video_output_mode=self._parse_bilibili_video_output_mode(
+                bili.get("video_output_mode", "视频")
+            ),
+            show_uid=self._parse_bool(
+                bili.get("show_uid", True),
+                True,
+                "bilibili_enhanced.show_uid",
+            ),
         )
 
         # ── 微信视频号 ──────────────────────────────
@@ -1160,6 +1273,8 @@ class ConfigManager:
                 admin_assist_enabled=self.bilibili.enable_admin_assist,
                 credential_path=self.bilibili.cookie_runtime_file,
                 hot_comment_count=bili_hc,
+                video_output_mode=self.bilibili.video_output_mode,
+                show_uid=self.bilibili.show_uid,
             )
             parsers.append(self.bilibili_parser)
         if self._enable_douyin:
@@ -1251,7 +1366,7 @@ class ConfigManager:
 
         normalized: Dict[str, str] = {}
         valid_modes = set(OUTPUT_MODE_FLAGS)
-        missing_mode = OUTPUT_MODE_ALL
+        missing_mode: Optional[str] = None
         known_values = [values[key] for key in PARSER_OUTPUT_KEYS if key in values]
         if len(known_values) >= len(PARSER_OUTPUT_KEYS) - 1 and all(
             str(raw_mode or "").strip() == OUTPUT_MODE_DISABLED
@@ -1261,7 +1376,11 @@ class ConfigManager:
             missing_mode = OUTPUT_MODE_DISABLED
         for key in PARSER_OUTPUT_KEYS:
             if key not in values:
-                normalized[key] = missing_mode
+                normalized[key] = (
+                    missing_mode
+                    if missing_mode is not None
+                    else PERSONAL_PARSER_OUTPUT_DEFAULTS.get(key, OUTPUT_MODE_ALL)
+                )
                 continue
             raw_mode = values.get(key)
             mode = str(raw_mode).strip() if raw_mode is not None else ""
@@ -1414,13 +1533,11 @@ class ConfigManager:
 
     @classmethod
     def _migrate_message_config(cls, config: Dict[str, Any]) -> None:
-        """在保留持久化键的前提下迁移旧模式值和归档命令。"""
+        """迁移上游旧配置以及 personal 分支的旧消息配置。"""
         message = cls._as_dict(config.get("message"))
-        packing = cls._as_dict(message.get("packing"))
-        if not packing:
-            return
-
         changed = False
+
+        packing = cls._as_dict(message.get("packing"))
         legacy_mode_map = {
             "不打包": AGGREGATION_MODE_NONE,
             "全部打包": AGGREGATION_MODE_ALL,
@@ -1432,6 +1549,52 @@ class ConfigManager:
             packing["mode"] = migrated_mode
             changed = True
 
+        if "auto_pack" in message and not current_mode:
+            legacy_auto_pack = cls._coerce_bool(message.get("auto_pack"))
+            thresholds = cls._as_dict(packing.get("thresholds"))
+            thresholds.setdefault(
+                "image_count",
+                cls._parse_non_negative_int(
+                    message.get("smart_pack_image_count", 4), 4
+                ),
+            )
+            thresholds.setdefault(
+                "video_count",
+                cls._parse_non_negative_int(
+                    message.get("smart_pack_video_count", 2), 2
+                ),
+            )
+            thresholds.setdefault(
+                "text_length",
+                cls._parse_non_negative_int(
+                    message.get("smart_pack_desc_len", 100), 100
+                ),
+            )
+            thresholds.setdefault("node_count", 0)
+
+            if legacy_auto_pack:
+                # 旧 personal 语义：三个智能阈值都为 0 时表示始终打包，
+                # 不能迁成“按条件聚合 + 全 0”，否则会变成永不聚合。
+                legacy_thresholds = (
+                    thresholds.get("image_count", 0),
+                    thresholds.get("video_count", 0),
+                    thresholds.get("text_length", 0),
+                    thresholds.get("node_count", 0),
+                )
+                packing["mode"] = (
+                    AGGREGATION_MODE_ALL
+                    if all(
+                        cls._parse_non_negative_int(value, 0) <= 0
+                        for value in legacy_thresholds
+                    )
+                    else AGGREGATION_MODE_CONDITIONAL
+                )
+            else:
+                packing["mode"] = AGGREGATION_MODE_NONE
+
+            packing["thresholds"] = thresholds
+            changed = True
+
         archive = cls._as_dict(message.get("archive"))
         legacy_command = str(packing.get("zip_command", "") or "").strip()
         if legacy_command:
@@ -1439,8 +1602,29 @@ class ConfigManager:
                 archive["command"] = legacy_command
             packing["zip_command"] = ""
             changed = True
+
+        text_metadata = cls._as_dict(message.get("text_metadata"))
+        legacy_text = cls._as_dict(message.get("text_format"))
+        legacy_text_map = {
+            "show_title": "show_title",
+            "show_author": "show_author",
+            "show_desc": "show_description",
+            "show_timestamp": "show_timestamp",
+            "show_original_url": "show_original_link",
+            "show_video_size": "show_video_size",
+            "max_desc_length": "max_description_length",
+            "hide_redundant_twitter_title": "hide_redundant_twitter_title",
+            "hide_duplicate_title_author": "hide_duplicate_title_author",
+        }
+        if legacy_text:
+            for old_key, new_key in legacy_text_map.items():
+                if old_key in legacy_text and new_key not in text_metadata:
+                    text_metadata[new_key] = legacy_text[old_key]
+                    changed = True
+
         message["packing"] = packing
         message["archive"] = archive
+        message["text_metadata"] = text_metadata
         config["message"] = message
 
         if not changed:
@@ -1450,7 +1634,19 @@ class ConfigManager:
             try:
                 save_config()
             except Exception as exc:
-                logger.warning(f"保存归档配置迁移结果失败: {exc}")
+                logger.warning(f"保存配置迁移结果失败: {exc}")
+
+    @staticmethod
+    def _parse_bilibili_video_output_mode(value: Any) -> str:
+        mapping = {
+            "视频": "video",
+            "仅封面": "cover",
+            "仅文本": "metadata",
+            "video": "video",
+            "cover": "cover",
+            "metadata": "metadata",
+        }
+        return mapping.get(str(value or "视频").strip(), "video")
 
     @staticmethod
     def _normalize_llm_provider_source(value: Any) -> str:

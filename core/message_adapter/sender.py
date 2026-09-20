@@ -4,9 +4,10 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 from astrbot.api.event import AstrMessageEvent
-from astrbot.api.message_components import Nodes, Plain, Image, Node, Reply
+from astrbot.api.message_components import Nodes, Plain, Image, Node, Reply, Video
 
 from ..logger import logger
+from ..downloader.utils import strip_media_prefixes
 
 from .node_builder import is_pure_image_gallery
 
@@ -17,6 +18,10 @@ class MessageDeliveryError(RuntimeError):
 
 class MessageSender:
     """消息发送器，封装统一的私聊/群聊发送接口。"""
+
+    FORWARD_CHUNK_SIZE = 8
+    DIRECT_IMAGE_BATCH_SIZE = 4
+    VIDEO_PACK_THRESHOLD = 0
 
     @staticmethod
     def _image_from_reference(reference: str) -> Image:
@@ -70,7 +75,11 @@ class MessageSender:
         except Exception as exc:
             logger.warning(f"发送部分失败提示失败: {exc}")
 
-    def get_sender_info(self, event: AstrMessageEvent) -> tuple:
+    def get_sender_info(
+        self,
+        event: AstrMessageEvent,
+        sender_name: str = "视频解析bot",
+    ) -> tuple:
         """获取发送者信息
 
         Args:
@@ -79,7 +88,7 @@ class MessageSender:
         Returns:
             包含发送者名称和ID的元组 (sender_name, sender_id)
         """
-        sender_name = "视频解析bot"
+        sender_name = str(sender_name or "视频解析bot").strip() or "视频解析bot"
         platform = event.get_platform_name()
         sender_id = event.get_self_id()
         if platform not in ("wechatpadpro", "webchat", "gewechat"):
@@ -88,6 +97,214 @@ class MessageSender:
             except (ValueError, TypeError):
                 sender_id = 10000
         return sender_name, sender_id
+
+    @staticmethod
+    def _plain_text(node: Plain) -> str:
+        for attr in ("text", "message", "content"):
+            value = getattr(node, attr, None)
+            if value:
+                return str(value)
+        return str(node)
+
+    @staticmethod
+    def _onebot_local_file(path: str) -> str:
+        value = str(path or "").strip()
+        if not value:
+            return ""
+        if value.lower().startswith(("http://", "https://", "file://")):
+            return value
+        try:
+            if Path(value).is_absolute():
+                return Path(value).resolve().as_uri()
+        except (OSError, ValueError):
+            pass
+        return value
+
+    @staticmethod
+    def _get_forward_image_file(metadata: dict, image_ordinal: int) -> str:
+        """返回第 N 个实际图片节点对应的 OneBot 文件引用。"""
+        video_urls = metadata.get("video_urls") or []
+        image_urls = metadata.get("image_urls") or []
+        image_modes = metadata.get("image_modes") or []
+        file_paths = metadata.get("file_paths") or []
+        file_token_urls = metadata.get("file_token_urls") or []
+        use_fts = bool(metadata.get("use_file_token_service"))
+        seen = 0
+
+        for image_idx, url_list in enumerate(image_urls):
+            mode = (
+                image_modes[image_idx]
+                if image_idx < len(image_modes)
+                else ("local" if metadata.get("use_local_files") else "direct")
+            )
+            if mode == "skip" or not isinstance(url_list, list) or not url_list:
+                continue
+            image_url = str(url_list[0] or "").strip()
+            if not image_url:
+                continue
+
+            file_idx = len(video_urls) + image_idx
+            token_url = (
+                str(file_token_urls[file_idx] or "").strip()
+                if use_fts and file_idx < len(file_token_urls)
+                else ""
+            )
+            if token_url:
+                forward_ref = token_url
+            elif mode == "local":
+                if (
+                    file_idx >= len(file_paths)
+                    or not file_paths[file_idx]
+                    or not Path(file_paths[file_idx]).exists()
+                ):
+                    # node_builder 不会为不可访问的本地文件创建 Image 节点。
+                    continue
+                # NapCat 合并转发图片优先使用源 URL，避免容器本地路径不可见。
+                forward_ref = image_url
+            else:
+                forward_ref = image_url
+
+            if seen == image_ordinal:
+                return forward_ref
+            seen += 1
+        return ""
+
+    @classmethod
+    def _get_forward_video_file(cls, metadata: dict, video_ordinal: int) -> str:
+        """返回第 N 个实际视频节点对应的 OneBot 文件引用。"""
+        video_urls = metadata.get("video_urls") or []
+        video_modes = metadata.get("video_modes") or []
+        file_paths = metadata.get("file_paths") or []
+        file_token_urls = metadata.get("file_token_urls") or []
+        use_fts = bool(metadata.get("use_file_token_service"))
+        seen = 0
+
+        for video_idx, url_list in enumerate(video_urls):
+            mode = (
+                video_modes[video_idx]
+                if video_idx < len(video_modes)
+                else ("local" if metadata.get("use_local_files") else "direct")
+            )
+            if mode == "skip" or not isinstance(url_list, list) or not url_list:
+                continue
+            video_url = str(url_list[0] or "").strip()
+            if not video_url:
+                continue
+
+            token_url = (
+                str(file_token_urls[video_idx] or "").strip()
+                if use_fts and video_idx < len(file_token_urls)
+                else ""
+            )
+            if token_url:
+                forward_ref = token_url
+            elif mode == "local":
+                if (
+                    video_idx >= len(file_paths)
+                    or not file_paths[video_idx]
+                    or not Path(file_paths[video_idx]).exists()
+                ):
+                    # node_builder 不会为不可访问的本地文件创建 Video 节点。
+                    continue
+                forward_ref = cls._onebot_local_file(file_paths[video_idx])
+                if not forward_ref:
+                    continue
+            else:
+                forward_ref = strip_media_prefixes(video_url)
+
+            if seen == video_ordinal:
+                return forward_ref
+            seen += 1
+        return ""
+
+    @staticmethod
+    def _build_onebot_segment(kind: str, value: Any) -> Optional[dict]:
+        value = str(value or "").strip()
+        if not value:
+            return None
+        if kind == "text":
+            return {"type": "text", "data": {"text": value}}
+        if kind in ("image", "video"):
+            return {"type": kind, "data": {"file": value}}
+        return None
+
+    def _build_onebot_forward_message_chunks(
+        self,
+        items: list[tuple[str, Any]],
+        sender_name: str,
+        sender_id: Any,
+    ) -> list[list[dict]]:
+        if not items:
+            return []
+        chunk_size = (
+            self.FORWARD_CHUNK_SIZE if self.FORWARD_CHUNK_SIZE > 0 else len(items)
+        )
+        chunk_size = max(1, chunk_size)
+        chunks = []
+        for start in range(0, len(items), chunk_size):
+            messages = []
+            for kind, value in items[start : start + chunk_size]:
+                segment = self._build_onebot_segment(kind, value)
+                if segment is None:
+                    continue
+                messages.append(
+                    {
+                        "type": "node",
+                        "data": {
+                            "name": sender_name,
+                            "uin": str(sender_id),
+                            "content": [segment],
+                        },
+                    }
+                )
+            if messages:
+                chunks.append(messages)
+        return chunks
+
+    async def _send_onebot_forward_items(
+        self,
+        event: AstrMessageEvent,
+        items: list[tuple[str, Any]],
+        sender_name: str,
+        sender_id: Any,
+    ) -> Optional[tuple[int, int, list[tuple[int, Exception]]]]:
+        """NapCat/aiocqhttp 优先直调 OneBot 合并转发；不适用时返回 None。"""
+        if not items or event.get_platform_name() != "aiocqhttp":
+            return None
+        bot = getattr(event, "bot", None)
+        if bot is None:
+            return None
+
+        chunks = self._build_onebot_forward_message_chunks(
+            items,
+            sender_name,
+            sender_id,
+        )
+        if not chunks:
+            return None
+
+        expected = len(chunks)
+        succeeded = 0
+        failed_chunks: list[tuple[int, Exception]] = []
+        for chunk_idx, messages in enumerate(chunks):
+            try:
+                if event.is_private_chat():
+                    await bot.send_private_forward_msg(
+                        user_id=int(event.get_sender_id()),
+                        messages=messages,
+                    )
+                else:
+                    await bot.send_group_forward_msg(
+                        group_id=int(event.get_group_id()),
+                        messages=messages,
+                    )
+                succeeded += 1
+            except Exception as exc:
+                failed_chunks.append((chunk_idx, exc))
+                logger.warning(
+                    f"OneBot合并转发第 {chunk_idx + 1} 批直调失败: {exc}"
+                )
+        return expected, succeeded, failed_chunks
 
     async def send_aggregated_results(
         self,
@@ -135,46 +352,184 @@ class MessageSender:
 
         if normal_link_nodes or rendered_image is not None:
             flat_nodes = []
+            direct_nodes = []
+            aggregate_link_groups = []
+            onebot_item_groups = []
+            onebot_compatible = True
+            total_videos = sum(
+                isinstance(node, Video)
+                for meta in normal_metadata
+                for node in meta.get("link_nodes", [])
+            )
+            pack_videos = (
+                self.VIDEO_PACK_THRESHOLD > 0
+                and total_videos > self.VIDEO_PACK_THRESHOLD
+            )
+
             if rendered_image is not None:
-                flat_nodes.append(
-                    Node(
-                        name=sender_name,
-                        uin=sender_id,
-                        content=[rendered_image],
-                    )
+                aggregate_link_groups.append(
+                    [
+                        Node(
+                            name=sender_name,
+                            uin=sender_id,
+                            content=[rendered_image],
+                        )
+                    ]
                 )
-            for link_idx, link_nodes in enumerate(normal_link_nodes):
-                if is_pure_image_gallery(link_nodes):
-                    texts = [node for node in link_nodes if isinstance(node, Plain)]
-                    images = [node for node in link_nodes if isinstance(node, Image)]
-                    for text in texts:
-                        flat_nodes.append(
-                            Node(name=sender_name, uin=sender_id, content=[text])
-                        )
-                    if images:
-                        flat_nodes.append(
-                            Node(name=sender_name, uin=sender_id, content=images)
-                        )
+                rendered_ref = self._onebot_local_file(text_metadata_image)
+                if rendered_ref:
+                    onebot_item_groups.append([("image", rendered_ref)])
                 else:
-                    for node in link_nodes:
-                        if node is not None:
-                            flat_nodes.append(
-                                Node(name=sender_name, uin=sender_id, content=[node])
-                            )
-                if link_idx < len(normal_link_nodes) - 1:
+                    onebot_compatible = False
+
+            for meta in normal_metadata:
+                link_nodes = meta.get("link_nodes") or []
+                metadata = meta.get("metadata") or {}
+                link_forward_nodes = []
+                link_forward_items = []
+                image_ordinal = 0
+                video_ordinal = 0
+
+                for node in link_nodes:
+                    if node is None:
+                        continue
+                    if isinstance(node, Plain):
+                        link_forward_nodes.append(
+                            Node(name=sender_name, uin=sender_id, content=[node])
+                        )
+                        link_forward_items.append(("text", self._plain_text(node)))
+                    elif isinstance(node, Image):
+                        link_forward_nodes.append(
+                            Node(name=sender_name, uin=sender_id, content=[node])
+                        )
+                        image_file = self._get_forward_image_file(
+                            metadata,
+                            image_ordinal,
+                        )
+                        image_ordinal += 1
+                        if image_file:
+                            link_forward_items.append(("image", image_file))
+                        else:
+                            onebot_compatible = False
+                    elif isinstance(node, Video):
+                        if not pack_videos:
+                            direct_nodes.append(node)
+                            video_ordinal += 1
+                            continue
+                        link_forward_nodes.append(
+                            Node(name=sender_name, uin=sender_id, content=[node])
+                        )
+                        video_file = self._get_forward_video_file(
+                            metadata,
+                            video_ordinal,
+                        )
+                        video_ordinal += 1
+                        if video_file:
+                            link_forward_items.append(("video", video_file))
+                        else:
+                            onebot_compatible = False
+                    else:
+                        link_forward_nodes.append(
+                            Node(name=sender_name, uin=sender_id, content=[node])
+                        )
+                        onebot_compatible = False
+
+                if link_forward_nodes:
+                    aggregate_link_groups.append(link_forward_nodes)
+                    onebot_item_groups.append(link_forward_items)
+
+            onebot_items = []
+            for group_idx, link_forward_nodes in enumerate(aggregate_link_groups):
+                flat_nodes.extend(link_forward_nodes)
+                if group_idx < len(aggregate_link_groups) - 1:
                     flat_nodes.append(
                         Node(
-                            name=sender_name, uin=sender_id, content=[Plain(separator)]
+                            name=sender_name,
+                            uin=sender_id,
+                            content=[Plain(separator)],
                         )
                     )
-            if flat_nodes:
+
+            non_empty_onebot_groups = [group for group in onebot_item_groups if group]
+            for group_idx, group in enumerate(non_empty_onebot_groups):
+                onebot_items.extend(group)
+                if group_idx < len(non_empty_onebot_groups) - 1:
+                    onebot_items.append(("text", separator))
+
+            used_onebot = False
+            if flat_nodes and onebot_compatible and onebot_items:
+                onebot_result = await self._send_onebot_forward_items(
+                    event,
+                    onebot_items,
+                    sender_name,
+                    sender_id,
+                )
+                if onebot_result is not None:
+                    (
+                        onebot_expected,
+                        onebot_succeeded,
+                        failed_chunks,
+                    ) = onebot_result
+                    expected += onebot_expected
+                    succeeded += onebot_succeeded
+                    used_onebot = True
+
+                    chunk_size = (
+                        self.FORWARD_CHUNK_SIZE
+                        if self.FORWARD_CHUNK_SIZE > 0
+                        else len(flat_nodes)
+                    )
+                    chunk_size = max(1, chunk_size)
+                    for chunk_idx, onebot_error in failed_chunks:
+                        start = chunk_idx * chunk_size
+                        fallback_chunk = flat_nodes[start : start + chunk_size]
+                        if not fallback_chunk:
+                            errors.append(onebot_error)
+                            continue
+                        try:
+                            await event.send(
+                                event.chain_result([Nodes(fallback_chunk)])
+                            )
+                            succeeded += 1
+                            logger.warning(
+                                f"OneBot合并转发第 {chunk_idx + 1} 批失败，"
+                                "已回退 AstrBot Nodes 发送"
+                            )
+                        except Exception as fallback_error:
+                            errors.append(fallback_error)
+                            logger.warning(
+                                f"OneBot合并转发第 {chunk_idx + 1} 批及 "
+                                f"AstrBot Nodes 回退均失败: {fallback_error}"
+                            )
+
+            if flat_nodes and not used_onebot:
+                chunk_size = (
+                    self.FORWARD_CHUNK_SIZE
+                    if self.FORWARD_CHUNK_SIZE > 0
+                    else len(flat_nodes)
+                )
+                chunk_size = max(1, chunk_size)
+                for start in range(0, len(flat_nodes), chunk_size):
+                    expected += 1
+                    try:
+                        await event.send(
+                            event.chain_result(
+                                [Nodes(flat_nodes[start : start + chunk_size])]
+                            )
+                        )
+                        succeeded += 1
+                    except Exception as exc:
+                        errors.append(exc)
+                        logger.warning(f"发送聚合消息失败: {exc}")
+
+            for node in direct_nodes:
                 expected += 1
                 try:
-                    await event.send(event.chain_result([Nodes(flat_nodes)]))
+                    await event.send(event.chain_result([node]))
                     succeeded += 1
                 except Exception as exc:
                     errors.append(exc)
-                    logger.warning(f"发送聚合消息失败: {exc}")
+                    logger.warning(f"发送聚合外视频节点失败: {exc}")
 
         if large_media_link_nodes:
             (
@@ -290,30 +645,85 @@ class MessageSender:
             if is_pure_image_gallery(link_nodes):
                 texts = [node for node in link_nodes if isinstance(node, Plain)]
                 images = [node for node in link_nodes if isinstance(node, Image)]
-                for text in texts:
+                if len(texts) == 1 and len(images) == 1:
                     expected += 1
                     try:
-                        await self._send_single_node(
-                            event,
-                            text,
-                            quote_message_id=(
-                                quote_message_id
-                                if quote_user_message and text is metadata_text_node
-                                else ""
-                            ),
+                        content = []
+                        if (
+                            quote_user_message
+                            and texts[0] is metadata_text_node
+                            and quote_message_id
+                        ):
+                            content.append(Reply(id=quote_message_id))
+                        content.extend([texts[0], images[0]])
+                        await event.send(event.chain_result(content))
+                        succeeded += 1
+                    except Exception as exc:
+                        logger.warning(
+                            f"合并发送文本和单图失败，回退分开发送: {exc}"
                         )
-                        succeeded += 1
-                    except Exception as exc:
-                        errors.append(exc)
-                        logger.warning(f"发送文本节点失败: {exc}")
-                if images:
-                    expected += 1
-                    try:
-                        await event.send(event.chain_result(images))
-                        succeeded += 1
-                    except Exception as exc:
-                        errors.append(exc)
-                        logger.warning(f"发送图片组失败: {exc}")
+                        # 合并发送只是优化路径；失败后按两个独立内容重新计数。
+                        expected += 1
+                        try:
+                            await self._send_single_node(
+                                event,
+                                texts[0],
+                                quote_message_id=(
+                                    quote_message_id
+                                    if (
+                                        quote_user_message
+                                        and texts[0] is metadata_text_node
+                                    )
+                                    else ""
+                                ),
+                            )
+                            succeeded += 1
+                        except Exception as text_exc:
+                            errors.append(text_exc)
+                            logger.warning(f"回退发送文本节点失败: {text_exc}")
+                        try:
+                            await event.send(event.chain_result([images[0]]))
+                            succeeded += 1
+                        except Exception as image_exc:
+                            errors.append(image_exc)
+                            logger.warning(f"回退发送单图失败: {image_exc}")
+                else:
+                    for text in texts:
+                        expected += 1
+                        try:
+                            await self._send_single_node(
+                                event,
+                                text,
+                                quote_message_id=(
+                                    quote_message_id
+                                    if quote_user_message
+                                    and text is metadata_text_node
+                                    else ""
+                                ),
+                            )
+                            succeeded += 1
+                        except Exception as exc:
+                            errors.append(exc)
+                            logger.warning(f"发送文本节点失败: {exc}")
+                    if images:
+                        batch_size = (
+                            self.DIRECT_IMAGE_BATCH_SIZE
+                            if self.DIRECT_IMAGE_BATCH_SIZE > 0
+                            else len(images)
+                        )
+                        batch_size = max(1, batch_size)
+                        for start in range(0, len(images), batch_size):
+                            expected += 1
+                            try:
+                                await event.send(
+                                    event.chain_result(
+                                        images[start : start + batch_size]
+                                    )
+                                )
+                                succeeded += 1
+                            except Exception as exc:
+                                errors.append(exc)
+                                logger.warning(f"发送图片组失败: {exc}")
             else:
                 for node in link_nodes:
                     if node is not None:
@@ -377,16 +787,34 @@ class MessageSender:
                             )
                         )
             if flat_nodes:
-                try:
-                    await event.send(event.chain_result([Nodes(flat_nodes)]))
-                except Exception as exc:
-                    await self._finish_best_effort_delivery(
-                        event,
-                        label="翻译结果",
-                        expected=1,
-                        succeeded=0,
-                        errors=[exc],
-                    )
+                chunk_size = (
+                    self.FORWARD_CHUNK_SIZE
+                    if self.FORWARD_CHUNK_SIZE > 0
+                    else len(flat_nodes)
+                )
+                chunk_size = max(1, chunk_size)
+                expected = 0
+                succeeded = 0
+                errors: list[Exception] = []
+                for start in range(0, len(flat_nodes), chunk_size):
+                    expected += 1
+                    try:
+                        await event.send(
+                            event.chain_result(
+                                [Nodes(flat_nodes[start : start + chunk_size])]
+                            )
+                        )
+                        succeeded += 1
+                    except Exception as exc:
+                        errors.append(exc)
+                        logger.warning(f"发送聚合翻译消息失败: {exc}")
+                await self._finish_best_effort_delivery(
+                    event,
+                    label="翻译结果",
+                    expected=expected,
+                    succeeded=succeeded,
+                    errors=errors,
+                )
             return
 
         separator = "-------------------------------------"
