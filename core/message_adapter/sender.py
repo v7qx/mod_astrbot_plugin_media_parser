@@ -144,6 +144,7 @@ class MessageSender:
         if normal_link_nodes or rendered_image is not None:
             flat_nodes = []
             direct_nodes = []
+            aggregate_link_groups = []
             total_videos = sum(
                 isinstance(node, Video)
                 for link_nodes in normal_link_nodes
@@ -153,6 +154,7 @@ class MessageSender:
                 self.VIDEO_PACK_THRESHOLD > 0
                 and total_videos > self.VIDEO_PACK_THRESHOLD
             )
+
             if rendered_image is not None:
                 flat_nodes.append(
                     Node(
@@ -161,16 +163,18 @@ class MessageSender:
                         content=[rendered_image],
                     )
                 )
-            for link_idx, link_nodes in enumerate(normal_link_nodes):
+
+            for link_nodes in normal_link_nodes:
+                link_forward_nodes = []
                 if is_pure_image_gallery(link_nodes):
                     texts = [node for node in link_nodes if isinstance(node, Plain)]
                     images = [node for node in link_nodes if isinstance(node, Image)]
                     for text in texts:
-                        flat_nodes.append(
+                        link_forward_nodes.append(
                             Node(name=sender_name, uin=sender_id, content=[text])
                         )
                     for image in images:
-                        flat_nodes.append(
+                        link_forward_nodes.append(
                             Node(name=sender_name, uin=sender_id, content=[image])
                         )
                 else:
@@ -180,15 +184,24 @@ class MessageSender:
                         if isinstance(node, Video) and not pack_videos:
                             direct_nodes.append(node)
                             continue
-                        flat_nodes.append(
+                        link_forward_nodes.append(
                             Node(name=sender_name, uin=sender_id, content=[node])
                         )
-                if link_idx < len(normal_link_nodes) - 1:
+
+                if link_forward_nodes:
+                    aggregate_link_groups.append(link_forward_nodes)
+
+            for group_idx, link_forward_nodes in enumerate(aggregate_link_groups):
+                flat_nodes.extend(link_forward_nodes)
+                if group_idx < len(aggregate_link_groups) - 1:
                     flat_nodes.append(
                         Node(
-                            name=sender_name, uin=sender_id, content=[Plain(separator)]
+                            name=sender_name,
+                            uin=sender_id,
+                            content=[Plain(separator)],
                         )
                     )
+
             if flat_nodes:
                 chunk_size = (
                     self.FORWARD_CHUNK_SIZE
