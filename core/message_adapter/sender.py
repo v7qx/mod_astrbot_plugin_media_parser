@@ -359,8 +359,34 @@ class MessageSender:
                         await event.send(event.chain_result(content))
                         succeeded += 1
                     except Exception as exc:
-                        errors.append(exc)
-                        logger.warning(f"合并发送文本和单图失败: {exc}")
+                        logger.warning(
+                            f"合并发送文本和单图失败，回退分开发送: {exc}"
+                        )
+                        # 合并发送只是优化路径；失败后按两个独立内容重新计数。
+                        expected += 1
+                        try:
+                            await self._send_single_node(
+                                event,
+                                texts[0],
+                                quote_message_id=(
+                                    quote_message_id
+                                    if (
+                                        quote_user_message
+                                        and texts[0] is metadata_text_node
+                                    )
+                                    else ""
+                                ),
+                            )
+                            succeeded += 1
+                        except Exception as text_exc:
+                            errors.append(text_exc)
+                            logger.warning(f"回退发送文本节点失败: {text_exc}")
+                        try:
+                            await event.send(event.chain_result([images[0]]))
+                            succeeded += 1
+                        except Exception as image_exc:
+                            errors.append(image_exc)
+                            logger.warning(f"回退发送单图失败: {image_exc}")
                 else:
                     for text in texts:
                         expected += 1
