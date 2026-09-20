@@ -186,6 +186,7 @@ class BilibiliParser(BaseVideoParser):
         credential_path: str = "",
         max_quality: int = 0,
         hot_comment_count: int = 0,
+        show_uid: bool = True,
     ):
         """初始化B站解析器"""
         super().__init__("bilibili")
@@ -200,6 +201,7 @@ class BilibiliParser(BaseVideoParser):
         except (TypeError, ValueError):
             self.hot_comment_count = 0
         self.admin_assist_enabled = bool(admin_assist_enabled)
+        self.show_uid = bool(show_uid)
         self.auth_runtime = BilibiliAuthRuntime(
             enabled=self.cookie_runtime_enabled,
             configured_cookie=configured_cookie,
@@ -921,10 +923,10 @@ class BilibiliParser(BaseVideoParser):
         name = str(author_obj.get("name", "") or "").strip()
         mid = author_obj.get("mid") or basic.get("uid")
         if name and mid:
-            return f"{name}(uid:{mid})"
+            return f"{name}(uid:{mid})" if self.show_uid else name
         if name:
             return name
-        if mid:
+        if mid and self.show_uid:
             return f"(uid:{mid})"
         return ""
 
@@ -1367,10 +1369,10 @@ class BilibiliParser(BaseVideoParser):
         name = owner.get("name") or ""
         mid = owner.get("mid")
         if name and mid:
-            author = f"{name}(uid:{mid})"
+            author = f"{name}(uid:{mid})" if self.show_uid else name
         elif name:
             author = name
-        elif mid:
+        elif mid and self.show_uid:
             author = f"(uid:{mid})"
         else:
             author = ""
@@ -1456,10 +1458,10 @@ class BilibiliParser(BaseVideoParser):
             name = pub.get("name") or ""
             mid = pub.get("mid") or mid
         if name and mid:
-            author = f"{name}(uid:{mid})"
+            author = f"{name}(uid:{mid})" if self.show_uid else name
         elif name:
             author = name
-        elif mid:
+        elif mid and self.show_uid:
             author = f"(uid:{mid})"
         else:
             author = result.get("season_title") or result.get("title") or ""
@@ -2221,10 +2223,10 @@ class BilibiliParser(BaseVideoParser):
                     name = user_info.get("uname", "")
 
         if name and mid:
-            author = f"{name}(uid:{mid})"
+            author = f"{name}(uid:{mid})" if self.show_uid else name
         elif name:
             author = name
-        elif mid:
+        elif mid and self.show_uid:
             author = f"(uid:{mid})"
         else:
             author = ""
