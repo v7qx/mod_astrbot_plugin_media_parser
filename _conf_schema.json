@@ -356,6 +356,29 @@
                         },
                         "hint": "有效范围 16–42，数值越大图片越长。",
                         "default": 24
+                    },
+                    "show_video_size": {
+                        "description": "显示视频大小",
+                        "type": "bool",
+                        "hint": "关闭后不在文本元数据中显示已探测到的视频大小。",
+                        "default": true
+                    },
+                    "max_description_length": {
+                        "description": "简介/正文最大长度",
+                        "type": "int",
+                        "hint": "0 = 不截断；大于 0 时超过该字符数的简介/正文会截断并加省略号。",
+                        "default": 0
+                    },
+                    "hide_redundant_twitter_title": {
+                        "description": "隐藏 Twitter/X 冗余标题",
+                        "type": "bool",
+                        "hint": "隐藏类似“某某 的推文”这类与作者信息重复的自动标题。",
+                        "default": true
+                    },
+                    "hide_duplicate_title_author": {
+                        "description": "标题与作者相同时隐藏标题",
+                        "type": "bool",
+                        "default": true
                     }
                 }
             },
@@ -474,6 +497,12 @@
                                 "type": "int",
                                 "hint": "文本、图片和视频节点总数达到该值时聚合；0 = 不按节点数触发",
                                 "default": 5
+                            },
+                            "text_length": {
+                                "description": "文本字符数",
+                                "type": "int",
+                                "hint": "最终渲染后的文本节点总字符数达到该值时聚合；0 = 不按文本长度触发。",
+                                "default": 0
                             }
                         }
                     }
@@ -494,9 +523,33 @@
                         "description": "归档媒体总大小上限（MB）",
                         "type": "float",
                         "hint": "仅在填写归档命令后有作用。所有待归档媒体总大小超过该值时拒绝创建 ZIP；有效范围 1–4096 MB。",
-                        "default": 1024.0
+                        "default": 1024
                     }
                 }
+            },
+            "forward_sender_name": {
+                "description": "合并转发发送者名称",
+                "type": "string",
+                "hint": "仅合并转发节点显示名称使用。",
+                "default": "视频解析bot"
+            },
+            "forward_chunk_size": {
+                "description": "合并转发每批节点数",
+                "type": "int",
+                "hint": "0 = 不分批；NapCat/QQ 对超大合并转发不稳定时可调小。",
+                "default": 8
+            },
+            "direct_image_batch_size": {
+                "description": "非聚合图片每批数量",
+                "type": "int",
+                "hint": "0 = 一次发送全部图片。",
+                "default": 4
+            },
+            "video_pack_threshold": {
+                "description": "视频进入合并转发的阈值",
+                "type": "int",
+                "hint": "0 = 视频始终独立发送；大于 0 时，仅当本次普通结果中的视频数超过该值才放入合并转发。",
+                "default": 0
             }
         }
     },
@@ -647,13 +700,13 @@
                 "description": "视频大小上限（MB）",
                 "type": "float",
                 "hint": "普通视频先预检；DASH/M3U8 下载后按实际大小兜底；填 0 不限制。",
-                "default": 1000.0
+                "default": 1000
             },
             "large_video_threshold_mb": {
                 "description": "大视频阈值（MB）",
                 "type": "float",
                 "hint": "超过阈值的普通视频单独发送，不放入消息集合；有效上限 100 MB，填 0 不限制。",
-                "default": 100.0
+                "default": 100
             }
         }
     },
@@ -822,6 +875,29 @@
                         "default": "B站更新Cookie"
                     }
                 }
+            },
+            "skip_qq_card_parse": {
+                "description": "跳过 B站 QQ 卡片解析",
+                "type": "bool",
+                "hint": "避免与其他专门处理 B站卡片的机器人重复响应；普通文本 B站链接不受影响。",
+                "default": true
+            },
+            "video_output_mode": {
+                "description": "B站视频输出方式",
+                "type": "string",
+                "options": [
+                    "视频",
+                    "仅封面",
+                    "仅文本"
+                ],
+                "hint": "仅封面复用当前封面发送链路；仅文本不会下载/发送视频富媒体。",
+                "default": "视频"
+            },
+            "show_uid": {
+                "description": "B站作者显示 UID",
+                "type": "bool",
+                "hint": "关闭后作者字段仅显示用户名，不附加 (uid:...)。",
+                "default": true
             }
         }
     },
@@ -990,6 +1066,53 @@
                 "type": "bool",
                 "hint": "输出完整工作流详细日志",
                 "default": false
+            }
+        }
+    },
+    "dedup": {
+        "description": "多机器人互斥与 URL 冷却",
+        "type": "object",
+        "hint": "用于群聊中与其他解析机器人共存；默认关闭。URL 冷却与持久化解析频率限制相互独立。",
+        "items": {
+            "enable": {
+                "description": "启用",
+                "type": "bool",
+                "default": false
+            },
+            "group": {
+                "description": "启用互斥的群组",
+                "type": "list",
+                "hint": "留空表示所有群聊；每项一个群 ID。",
+                "items": {
+                    "type": "string"
+                },
+                "default": []
+            },
+            "competitor_bot_ids": {
+                "description": "互斥机器人 ID",
+                "type": "list",
+                "hint": "检测到这些机器人在等待期间发言时，本插件取消本次解析。",
+                "items": {
+                    "type": "string"
+                },
+                "default": []
+            },
+            "wait_seconds": {
+                "description": "等待其他机器人秒数",
+                "type": "float",
+                "hint": "群聊解析前等待的时间；0 = 不等待。",
+                "default": 2
+            },
+            "url_cooldown_seconds": {
+                "description": "同链接冷却秒数",
+                "type": "float",
+                "hint": "同一群/私聊范围内的短期内存冷却；0 = 关闭。",
+                "default": 120
+            },
+            "ignore_competitor_messages": {
+                "description": "忽略互斥机器人自己的消息",
+                "type": "bool",
+                "default": true
             }
         }
     }
