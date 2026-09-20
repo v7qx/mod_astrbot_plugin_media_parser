@@ -768,6 +768,7 @@ def build_all_nodes(
             link_metadata.append(
                 LinkBuildMeta(
                     metadata_index=idx,
+                    metadata=metadata,
                     link_nodes=link_nodes,
                     is_large_media=is_large_media,
                     is_normal=not is_large_media,
