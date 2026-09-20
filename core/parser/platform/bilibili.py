@@ -186,6 +186,7 @@ class BilibiliParser(BaseVideoParser):
         credential_path: str = "",
         max_quality: int = 0,
         hot_comment_count: int = 0,
+        video_output_mode: str = "video",
         show_uid: bool = True,
     ):
         """初始化B站解析器"""
@@ -201,6 +202,9 @@ class BilibiliParser(BaseVideoParser):
         except (TypeError, ValueError):
             self.hot_comment_count = 0
         self.admin_assist_enabled = bool(admin_assist_enabled)
+        self.video_output_mode = str(video_output_mode or "video").strip()
+        if self.video_output_mode not in ("video", "cover", "metadata"):
+            self.video_output_mode = "video"
         self.show_uid = bool(show_uid)
         self.auth_runtime = BilibiliAuthRuntime(
             enabled=self.cookie_runtime_enabled,
@@ -2626,6 +2630,54 @@ class BilibiliParser(BaseVideoParser):
             if p_index > len(pages):
                 raise RuntimeError(f"分P序号超出范围: {p_index}")
             cid = pages[p_index - 1]["cid"]
+
+            if self.video_output_mode != "video":
+                referer = page_url
+                origin = "https://www.bilibili.com"
+                image_headers, video_headers = self._build_media_headers(
+                    referer=referer,
+                    origin=origin,
+                    cookie_header=cookie_header,
+                )
+                display_url = original_url if _is_b23_url(original_url) else page_url
+                cover_url = self._normalize_bilibili_url(info.get("pic") or "")
+                if cover_url.startswith("http://"):
+                    cover_url = "https://" + cover_url[len("http://"):]
+
+                result = {
+                    "url": display_url,
+                    "title": info.get("title", ""),
+                    "author": info.get("author", ""),
+                    "desc": info.get("desc", ""),
+                    "timestamp": info.get("timestamp", ""),
+                    "video_urls": [],
+                    "image_urls": (
+                        [[cover_url]]
+                        if self.video_output_mode == "cover" and cover_url
+                        else []
+                    ),
+                    "image_headers": image_headers,
+                    "video_headers": video_headers,
+                }
+                if self.video_output_mode == "cover" and not cover_url:
+                    result.setdefault("image_skip_reasons", []).append(
+                        "B站接口未返回封面 pic"
+                    )
+                if enable_hot_comments:
+                    await self._attach_hot_comments_to_result(
+                        session=session,
+                        result=result,
+                        oid=comment_oid,
+                        comment_type=comment_type,
+                        referer=page_url,
+                        cookie_header=cookie_header,
+                    )
+                logger.debug(
+                    f"[{self.name}] video_output_mode={self.video_output_mode}，"
+                    "跳过UGC播放地址探测"
+                )
+                return result
+
             access_info = await self._analyze_target_access(
                 vtype="ugc",
                 referer=page_url,
@@ -2672,6 +2724,54 @@ class BilibiliParser(BaseVideoParser):
                 )
             except (TypeError, ValueError):
                 comment_oid = None
+
+            if self.video_output_mode != "video":
+                referer = page_url
+                origin = "https://www.bilibili.com"
+                image_headers, video_headers = self._build_media_headers(
+                    referer=referer,
+                    origin=origin,
+                    cookie_header=cookie_header,
+                )
+                display_url = original_url if _is_b23_url(original_url) else page_url
+                cover_url = self._normalize_bilibili_url(info.get("pic") or "")
+                if cover_url.startswith("http://"):
+                    cover_url = "https://" + cover_url[len("http://"):]
+
+                result = {
+                    "url": display_url,
+                    "title": info.get("title", ""),
+                    "author": info.get("author", ""),
+                    "desc": info.get("desc", ""),
+                    "timestamp": info.get("timestamp", ""),
+                    "video_urls": [],
+                    "image_urls": (
+                        [[cover_url]]
+                        if self.video_output_mode == "cover" and cover_url
+                        else []
+                    ),
+                    "image_headers": image_headers,
+                    "video_headers": video_headers,
+                }
+                if self.video_output_mode == "cover" and not cover_url:
+                    result.setdefault("image_skip_reasons", []).append(
+                        "B站接口未返回封面 pic"
+                    )
+                if enable_hot_comments:
+                    await self._attach_hot_comments_to_result(
+                        session=session,
+                        result=result,
+                        oid=comment_oid,
+                        comment_type=comment_type,
+                        referer=page_url,
+                        cookie_header=cookie_header,
+                    )
+                logger.debug(
+                    f"[{self.name}] video_output_mode={self.video_output_mode}，"
+                    "跳过PGC播放地址探测"
+                )
+                return result
+
             access_info = await self._analyze_target_access(
                 vtype="pgc",
                 referer=page_url,
