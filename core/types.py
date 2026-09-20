@@ -88,6 +88,7 @@ class MediaMetadata(TypedDict, total=False):
 class LinkBuildMeta(TypedDict):
     """node_builder 为每条链接构建的辅助元数据，用于发送阶段。"""
     metadata_index: int
+    metadata: MediaMetadata
     link_nodes: List[Any]
     is_large_media: bool
     is_normal: bool
