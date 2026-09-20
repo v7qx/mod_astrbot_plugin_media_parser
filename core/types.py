@@ -49,6 +49,10 @@ class MediaMetadata(TypedDict, total=False):
     _enable_text_metadata: bool
     _enable_rich_media: bool
     _text_metadata_fields: Dict[str, bool]
+    _max_description_length: int
+    _hide_redundant_twitter_title: bool
+    _hide_duplicate_title_author: bool
+    _video_cover_only: bool
     translation_target_language: str
     _translated_fields: Dict[str, str]
 
