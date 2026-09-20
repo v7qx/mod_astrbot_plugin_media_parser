@@ -21,12 +21,13 @@ class DedupGuard:
 
     def is_competitor_message(self, sender_id: str) -> bool:
         return bool(
-            self.config.competitor_bot_ids
+            self.config.enable
+            and self.config.competitor_bot_ids
             and str(sender_id) in self.config.competitor_bot_ids
         )
 
     def record_competitor_message(self, group_id: str) -> None:
-        if not group_id:
+        if not self.config.enable or not group_id:
             return
         self._competitor_msg_times[str(group_id)] = time.monotonic()
         self._cleanup()
@@ -43,20 +44,20 @@ class DedupGuard:
         return f"{scope}_{self._normalize_url(url)}"
 
     def is_url_cooldown(self, group_id: str, url: str) -> bool:
-        if self.config.url_cooldown_seconds <= 0:
+        if not self.config.enable or self.config.url_cooldown_seconds <= 0:
             return False
         last_time = self._url_cooldowns.get(self._url_key(group_id, url), 0.0)
         return (time.monotonic() - last_time) < self.config.url_cooldown_seconds
 
     def get_url_cooldown_remain(self, group_id: str, url: str) -> float:
-        if self.config.url_cooldown_seconds <= 0:
+        if not self.config.enable or self.config.url_cooldown_seconds <= 0:
             return 0.0
         last_time = self._url_cooldowns.get(self._url_key(group_id, url), 0.0)
         elapsed = time.monotonic() - last_time
         return max(0.0, self.config.url_cooldown_seconds - elapsed)
 
     def record_url_cooldown(self, group_id: str, url: str) -> None:
-        if self.config.url_cooldown_seconds <= 0:
+        if not self.config.enable or self.config.url_cooldown_seconds <= 0:
             return
         self._url_cooldowns[self._url_key(group_id, url)] = time.monotonic()
         self._cleanup()
