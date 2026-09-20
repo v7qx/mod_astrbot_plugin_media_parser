@@ -262,7 +262,7 @@ class MessageSender:
         items: list[tuple[str, Any]],
         sender_name: str,
         sender_id: Any,
-    ) -> Optional[tuple[int, int, list[Exception]]]:
+    ) -> Optional[tuple[int, int, list[tuple[int, Exception]]]]:
         """NapCat/aiocqhttp 优先直调 OneBot 合并转发；不适用时返回 None。"""
         if not items or event.get_platform_name() != "aiocqhttp":
             return None
@@ -280,8 +280,8 @@ class MessageSender:
 
         expected = len(chunks)
         succeeded = 0
-        errors: list[Exception] = []
-        for messages in chunks:
+        failed_chunks: list[tuple[int, Exception]] = []
+        for chunk_idx, messages in enumerate(chunks):
             try:
                 if event.is_private_chat():
                     await bot.send_private_forward_msg(
@@ -295,9 +295,11 @@ class MessageSender:
                     )
                 succeeded += 1
             except Exception as exc:
-                errors.append(exc)
-                logger.warning(f"OneBot合并转发直调失败: {exc}")
-        return expected, succeeded, errors
+                failed_chunks.append((chunk_idx, exc))
+                logger.warning(
+                    f"OneBot合并转发第 {chunk_idx + 1} 批直调失败: {exc}"
+                )
+        return expected, succeeded, failed_chunks
 
     async def send_aggregated_results(
         self,
@@ -360,12 +362,14 @@ class MessageSender:
             )
 
             if rendered_image is not None:
-                flat_nodes.append(
-                    Node(
-                        name=sender_name,
-                        uin=sender_id,
-                        content=[rendered_image],
-                    )
+                aggregate_link_groups.append(
+                    [
+                        Node(
+                            name=sender_name,
+                            uin=sender_id,
+                            content=[rendered_image],
+                        )
+                    ]
                 )
                 rendered_ref = self._onebot_local_file(text_metadata_image)
                 if rendered_ref:
@@ -456,15 +460,42 @@ class MessageSender:
                     sender_id,
                 )
                 if onebot_result is not None:
-                    onebot_expected, onebot_succeeded, onebot_errors = onebot_result
-                    # 全部失败时回退 AstrBot Nodes；部分成功时避免重复重发已成功块。
-                    if onebot_succeeded > 0:
-                        expected += onebot_expected
-                        succeeded += onebot_succeeded
-                        errors.extend(onebot_errors)
-                        used_onebot = True
-                    elif onebot_errors:
-                        logger.warning("OneBot合并转发全部失败，回退AstrBot Nodes")
+                    (
+                        onebot_expected,
+                        onebot_succeeded,
+                        failed_chunks,
+                    ) = onebot_result
+                    expected += onebot_expected
+                    succeeded += onebot_succeeded
+                    used_onebot = True
+
+                    chunk_size = (
+                        self.FORWARD_CHUNK_SIZE
+                        if self.FORWARD_CHUNK_SIZE > 0
+                        else len(flat_nodes)
+                    )
+                    chunk_size = max(1, chunk_size)
+                    for chunk_idx, onebot_error in failed_chunks:
+                        start = chunk_idx * chunk_size
+                        fallback_chunk = flat_nodes[start : start + chunk_size]
+                        if not fallback_chunk:
+                            errors.append(onebot_error)
+                            continue
+                        try:
+                            await event.send(
+                                event.chain_result([Nodes(fallback_chunk)])
+                            )
+                            succeeded += 1
+                            logger.warning(
+                                f"OneBot合并转发第 {chunk_idx + 1} 批失败，"
+                                "已回退 AstrBot Nodes 发送"
+                            )
+                        except Exception as fallback_error:
+                            errors.append(fallback_error)
+                            logger.warning(
+                                f"OneBot合并转发第 {chunk_idx + 1} 批及 "
+                                f"AstrBot Nodes 回退均失败: {fallback_error}"
+                            )
 
             if flat_nodes and not used_onebot:
                 chunk_size = (
