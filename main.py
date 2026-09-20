@@ -358,7 +358,9 @@ class VideoParserPlugin(Star):
                 metadata.get("parser_name") or metadata.get("platform") or ""
             ).strip()
             metadata["_video_cover_only"] = False
+            metadata["_show_uid"] = True
             if parser_name == "bilibili":
+                metadata["_show_uid"] = cfg.bilibili.show_uid
                 if cfg.bilibili.video_output_mode == "metadata":
                     rich_enabled = False
                 elif cfg.bilibili.video_output_mode == "cover":
