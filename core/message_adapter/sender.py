@@ -126,6 +126,7 @@ class MessageSender:
         video_urls = metadata.get("video_urls") or []
         image_urls = metadata.get("image_urls") or []
         image_modes = metadata.get("image_modes") or []
+        file_paths = metadata.get("file_paths") or []
         file_token_urls = metadata.get("file_token_urls") or []
         use_fts = bool(metadata.get("use_file_token_service"))
         seen = 0
@@ -141,28 +142,31 @@ class MessageSender:
             image_url = str(url_list[0] or "").strip()
             if not image_url:
                 continue
-            if seen != image_ordinal:
-                seen += 1
-                continue
 
             file_idx = len(video_urls) + image_idx
-            if (
-                use_fts
-                and file_idx < len(file_token_urls)
-                and file_token_urls[file_idx]
-            ):
-                return str(file_token_urls[file_idx]).strip()
-            if mode == "local":
+            token_url = (
+                str(file_token_urls[file_idx] or "").strip()
+                if use_fts and file_idx < len(file_token_urls)
+                else ""
+            )
+            if token_url:
+                forward_ref = token_url
+            elif mode == "local":
                 if (
-                    file_idx >= len(metadata.get("file_paths") or [])
-                    or not (metadata.get("file_paths") or [])[file_idx]
-                    or not Path((metadata.get("file_paths") or [])[file_idx]).exists()
+                    file_idx >= len(file_paths)
+                    or not file_paths[file_idx]
+                    or not Path(file_paths[file_idx]).exists()
                 ):
-                    # node_builder 对缺失的本地文件不会创建 Image 节点，
-                    # 因此该媒体不能计入当前 ordinal。
+                    # node_builder 不会为不可访问的本地文件创建 Image 节点。
                     continue
-            # NapCat 合并转发图片优先使用源 URL，避免容器本地路径不可见。
-            return image_url
+                # NapCat 合并转发图片优先使用源 URL，避免容器本地路径不可见。
+                forward_ref = image_url
+            else:
+                forward_ref = image_url
+
+            if seen == image_ordinal:
+                return forward_ref
+            seen += 1
         return ""
 
     @classmethod
@@ -186,30 +190,31 @@ class MessageSender:
             video_url = str(url_list[0] or "").strip()
             if not video_url:
                 continue
-            if seen != video_ordinal:
-                seen += 1
-                continue
 
-            if (
-                use_fts
-                and video_idx < len(file_token_urls)
-                and file_token_urls[video_idx]
-            ):
-                return str(file_token_urls[video_idx]).strip()
-
-            if mode == "local":
+            token_url = (
+                str(file_token_urls[video_idx] or "").strip()
+                if use_fts and video_idx < len(file_token_urls)
+                else ""
+            )
+            if token_url:
+                forward_ref = token_url
+            elif mode == "local":
                 if (
                     video_idx >= len(file_paths)
                     or not file_paths[video_idx]
                     or not Path(file_paths[video_idx]).exists()
                 ):
-                    # node_builder 对缺失的本地文件不会创建 Video 节点。
+                    # node_builder 不会为不可访问的本地文件创建 Video 节点。
                     continue
-                local_ref = cls._onebot_local_file(file_paths[video_idx])
-                if local_ref:
-                    return local_ref
+                forward_ref = cls._onebot_local_file(file_paths[video_idx])
+                if not forward_ref:
+                    continue
+            else:
+                forward_ref = strip_media_prefixes(video_url)
 
-            return strip_media_prefixes(video_url)
+            if seen == video_ordinal:
+                return forward_ref
+            seen += 1
         return ""
 
     @staticmethod
