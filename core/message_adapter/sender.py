@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 from astrbot.api.event import AstrMessageEvent
-from astrbot.api.message_components import Nodes, Plain, Image, Node, Reply
+from astrbot.api.message_components import Nodes, Plain, Image, Node, Reply, Video
 
 from ..logger import logger
 
@@ -17,6 +17,10 @@ class MessageDeliveryError(RuntimeError):
 
 class MessageSender:
     """消息发送器，封装统一的私聊/群聊发送接口。"""
+
+    FORWARD_CHUNK_SIZE = 8
+    DIRECT_IMAGE_BATCH_SIZE = 4
+    VIDEO_PACK_THRESHOLD = 0
 
     @staticmethod
     def _image_from_reference(reference: str) -> Image:
@@ -70,7 +74,11 @@ class MessageSender:
         except Exception as exc:
             logger.warning(f"发送部分失败提示失败: {exc}")
 
-    def get_sender_info(self, event: AstrMessageEvent) -> tuple:
+    def get_sender_info(
+        self,
+        event: AstrMessageEvent,
+        sender_name: str = "视频解析bot",
+    ) -> tuple:
         """获取发送者信息
 
         Args:
@@ -79,7 +87,7 @@ class MessageSender:
         Returns:
             包含发送者名称和ID的元组 (sender_name, sender_id)
         """
-        sender_name = "视频解析bot"
+        sender_name = str(sender_name or "视频解析bot").strip() or "视频解析bot"
         platform = event.get_platform_name()
         sender_id = event.get_self_id()
         if platform not in ("wechatpadpro", "webchat", "gewechat"):
@@ -135,6 +143,16 @@ class MessageSender:
 
         if normal_link_nodes or rendered_image is not None:
             flat_nodes = []
+            direct_nodes = []
+            total_videos = sum(
+                isinstance(node, Video)
+                for link_nodes in normal_link_nodes
+                for node in link_nodes
+            )
+            pack_videos = (
+                self.VIDEO_PACK_THRESHOLD > 0
+                and total_videos > self.VIDEO_PACK_THRESHOLD
+            )
             if rendered_image is not None:
                 flat_nodes.append(
                     Node(
@@ -151,16 +169,20 @@ class MessageSender:
                         flat_nodes.append(
                             Node(name=sender_name, uin=sender_id, content=[text])
                         )
-                    if images:
+                    for image in images:
                         flat_nodes.append(
-                            Node(name=sender_name, uin=sender_id, content=images)
+                            Node(name=sender_name, uin=sender_id, content=[image])
                         )
                 else:
                     for node in link_nodes:
-                        if node is not None:
-                            flat_nodes.append(
-                                Node(name=sender_name, uin=sender_id, content=[node])
-                            )
+                        if node is None:
+                            continue
+                        if isinstance(node, Video) and not pack_videos:
+                            direct_nodes.append(node)
+                            continue
+                        flat_nodes.append(
+                            Node(name=sender_name, uin=sender_id, content=[node])
+                        )
                 if link_idx < len(normal_link_nodes) - 1:
                     flat_nodes.append(
                         Node(
@@ -168,13 +190,33 @@ class MessageSender:
                         )
                     )
             if flat_nodes:
+                chunk_size = (
+                    self.FORWARD_CHUNK_SIZE
+                    if self.FORWARD_CHUNK_SIZE > 0
+                    else len(flat_nodes)
+                )
+                chunk_size = max(1, chunk_size)
+                for start in range(0, len(flat_nodes), chunk_size):
+                    expected += 1
+                    try:
+                        await event.send(
+                            event.chain_result(
+                                [Nodes(flat_nodes[start : start + chunk_size])]
+                            )
+                        )
+                        succeeded += 1
+                    except Exception as exc:
+                        errors.append(exc)
+                        logger.warning(f"发送聚合消息失败: {exc}")
+
+            for node in direct_nodes:
                 expected += 1
                 try:
-                    await event.send(event.chain_result([Nodes(flat_nodes)]))
+                    await event.send(event.chain_result([node]))
                     succeeded += 1
                 except Exception as exc:
                     errors.append(exc)
-                    logger.warning(f"发送聚合消息失败: {exc}")
+                    logger.warning(f"发送聚合外视频节点失败: {exc}")
 
         if large_media_link_nodes:
             (
@@ -290,30 +332,59 @@ class MessageSender:
             if is_pure_image_gallery(link_nodes):
                 texts = [node for node in link_nodes if isinstance(node, Plain)]
                 images = [node for node in link_nodes if isinstance(node, Image)]
-                for text in texts:
+                if len(texts) == 1 and len(images) == 1:
                     expected += 1
                     try:
-                        await self._send_single_node(
-                            event,
-                            text,
-                            quote_message_id=(
-                                quote_message_id
-                                if quote_user_message and text is metadata_text_node
-                                else ""
-                            ),
+                        content = []
+                        if (
+                            quote_user_message
+                            and texts[0] is metadata_text_node
+                            and quote_message_id
+                        ):
+                            content.append(Reply(id=quote_message_id))
+                        content.extend([texts[0], images[0]])
+                        await event.send(event.chain_result(content))
+                        succeeded += 1
+                    except Exception as exc:
+                        errors.append(exc)
+                        logger.warning(f"合并发送文本和单图失败: {exc}")
+                else:
+                    for text in texts:
+                        expected += 1
+                        try:
+                            await self._send_single_node(
+                                event,
+                                text,
+                                quote_message_id=(
+                                    quote_message_id
+                                    if quote_user_message
+                                    and text is metadata_text_node
+                                    else ""
+                                ),
+                            )
+                            succeeded += 1
+                        except Exception as exc:
+                            errors.append(exc)
+                            logger.warning(f"发送文本节点失败: {exc}")
+                    if images:
+                        batch_size = (
+                            self.DIRECT_IMAGE_BATCH_SIZE
+                            if self.DIRECT_IMAGE_BATCH_SIZE > 0
+                            else len(images)
                         )
-                        succeeded += 1
-                    except Exception as exc:
-                        errors.append(exc)
-                        logger.warning(f"发送文本节点失败: {exc}")
-                if images:
-                    expected += 1
-                    try:
-                        await event.send(event.chain_result(images))
-                        succeeded += 1
-                    except Exception as exc:
-                        errors.append(exc)
-                        logger.warning(f"发送图片组失败: {exc}")
+                        batch_size = max(1, batch_size)
+                        for start in range(0, len(images), batch_size):
+                            expected += 1
+                            try:
+                                await event.send(
+                                    event.chain_result(
+                                        images[start : start + batch_size]
+                                    )
+                                )
+                                succeeded += 1
+                            except Exception as exc:
+                                errors.append(exc)
+                                logger.warning(f"发送图片组失败: {exc}")
             else:
                 for node in link_nodes:
                     if node is not None:
@@ -377,16 +448,34 @@ class MessageSender:
                             )
                         )
             if flat_nodes:
-                try:
-                    await event.send(event.chain_result([Nodes(flat_nodes)]))
-                except Exception as exc:
-                    await self._finish_best_effort_delivery(
-                        event,
-                        label="翻译结果",
-                        expected=1,
-                        succeeded=0,
-                        errors=[exc],
-                    )
+                chunk_size = (
+                    self.FORWARD_CHUNK_SIZE
+                    if self.FORWARD_CHUNK_SIZE > 0
+                    else len(flat_nodes)
+                )
+                chunk_size = max(1, chunk_size)
+                expected = 0
+                succeeded = 0
+                errors: list[Exception] = []
+                for start in range(0, len(flat_nodes), chunk_size):
+                    expected += 1
+                    try:
+                        await event.send(
+                            event.chain_result(
+                                [Nodes(flat_nodes[start : start + chunk_size])]
+                            )
+                        )
+                        succeeded += 1
+                    except Exception as exc:
+                        errors.append(exc)
+                        logger.warning(f"发送聚合翻译消息失败: {exc}")
+                await self._finish_best_effort_delivery(
+                    event,
+                    label="翻译结果",
+                    expected=expected,
+                    succeeded=succeeded,
+                    errors=errors,
+                )
             return
 
         separator = "-------------------------------------"
