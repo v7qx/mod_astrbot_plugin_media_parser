@@ -152,6 +152,15 @@ class MessageSender:
                 and file_token_urls[file_idx]
             ):
                 return str(file_token_urls[file_idx]).strip()
+            if mode == "local":
+                if (
+                    file_idx >= len(metadata.get("file_paths") or [])
+                    or not (metadata.get("file_paths") or [])[file_idx]
+                    or not Path((metadata.get("file_paths") or [])[file_idx]).exists()
+                ):
+                    # node_builder 对缺失的本地文件不会创建 Image 节点，
+                    # 因此该媒体不能计入当前 ordinal。
+                    continue
             # NapCat 合并转发图片优先使用源 URL，避免容器本地路径不可见。
             return image_url
         return ""
@@ -188,11 +197,14 @@ class MessageSender:
             ):
                 return str(file_token_urls[video_idx]).strip()
 
-            if (
-                mode == "local"
-                and video_idx < len(file_paths)
-                and file_paths[video_idx]
-            ):
+            if mode == "local":
+                if (
+                    video_idx >= len(file_paths)
+                    or not file_paths[video_idx]
+                    or not Path(file_paths[video_idx]).exists()
+                ):
+                    # node_builder 对缺失的本地文件不会创建 Video 节点。
+                    continue
                 local_ref = cls._onebot_local_file(file_paths[video_idx])
                 if local_ref:
                     return local_ref
