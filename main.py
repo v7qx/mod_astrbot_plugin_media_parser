@@ -45,6 +45,7 @@ from .core.message_adapter.archive_builder import (
 )
 from .core.translation import MetadataTranslator
 from .core.config_manager import ConfigManager
+from .core.dedup_guard import DedupGuard
 from .core.interaction.platform.bilibili import BilibiliAdminCookieAssistManager
 from .core.output_policy import apply_override, parse_output_override
 
@@ -62,6 +63,7 @@ class VideoParserPlugin(Star):
 
         self.config_manager = ConfigManager(config)
         cfg = self.config_manager
+        self.dedup_guard = DedupGuard(cfg.dedup)
 
         parsers = cfg.create_parsers()
         self.parser_manager = ParserManager(parsers)
@@ -84,6 +86,11 @@ class VideoParserPlugin(Star):
         )
 
         self.message_sender = MessageSender()
+        self.message_sender.FORWARD_CHUNK_SIZE = cfg.message.forward_chunk_size
+        self.message_sender.DIRECT_IMAGE_BATCH_SIZE = (
+            cfg.message.direct_image_batch_size
+        )
+        self.message_sender.VIDEO_PACK_THRESHOLD = cfg.message.video_pack_threshold
         self._cleanup_tasks: set[asyncio.Task] = set()
         self._expired_cleanup_task: Optional[asyncio.Task] = None
         self._active_media_flows = 0
@@ -822,6 +829,38 @@ class VideoParserPlugin(Star):
                     self._active_media_flows - 1,
                 )
 
+    def _stop_event_if_supported(self, event: AstrMessageEvent) -> None:
+        """解析结果已处理后，尽量阻止后续 LLM pipeline 重复响应。"""
+        for method_name in (
+            "stop_event",
+            "stop_propagation",
+            "stop",
+            "prevent_default",
+        ):
+            method = getattr(event, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                method()
+                if self.config_manager.admin.debug_mode:
+                    self.logger.debug(f"已调用事件停止方法: {method_name}")
+                return
+            except TypeError:
+                continue
+            except Exception as exc:
+                if self.config_manager.admin.debug_mode:
+                    self.logger.debug(
+                        f"调用事件停止方法失败: {method_name}, 错误: {exc}"
+                    )
+        for attr_name in ("is_stopped", "stopped"):
+            try:
+                setattr(event, attr_name, True)
+                if self.config_manager.admin.debug_mode:
+                    self.logger.debug(f"已设置事件停止标记: {attr_name}")
+                return
+            except Exception:
+                continue
+
     async def _handle_clean_cache(self, event: AstrMessageEvent):
         cache_dir = self.download_manager.cache_dir
         if not cache_dir:
@@ -887,6 +926,20 @@ class VideoParserPlugin(Star):
         self_id = str(event.get_self_id() or "").strip()
         if self_id and str(sender_id or "").strip() == self_id:
             return
+
+        if (
+            cfg.dedup.enable
+            and group_id
+            and self.dedup_guard.is_competitor_message(sender_id)
+        ):
+            self.dedup_guard.record_competitor_message(group_id)
+            if cfg.dedup.ignore_competitor_messages:
+                if cfg.admin.debug_mode:
+                    self.logger.debug(
+                        f"忽略互斥机器人消息: group_id={group_id}, "
+                        f"sender_id={sender_id}"
+                    )
+                return
 
         if not cfg.permission.check(is_private, sender_id, group_id):
             return
@@ -1013,13 +1066,57 @@ class VideoParserPlugin(Star):
                 )
             return
 
+        if not zip_requested:
+            non_cooldown_links = []
+            for link, parser in links_with_parser:
+                if self.dedup_guard.is_url_cooldown(group_id, link):
+                    if cfg.admin.debug_mode:
+                        remain = self.dedup_guard.get_url_cooldown_remain(
+                            group_id, link
+                        )
+                        self.logger.debug(
+                            f"URL冷却命中: group_id={group_id}, url={link}, "
+                            f"剩余冷却时间={remain:.1f}s"
+                        )
+                else:
+                    non_cooldown_links.append((link, parser))
+
+            if not non_cooldown_links:
+                return
+            links_with_parser = non_cooldown_links
+
+            if (
+                group_id
+                and self.dedup_guard.is_group_enabled(group_id)
+                and cfg.dedup.competitor_bot_ids
+                and cfg.dedup.wait_seconds > 0
+            ):
+                if cfg.admin.debug_mode:
+                    self.logger.debug(
+                        f"开始互斥等待: group_id={group_id}, "
+                        f"wait_seconds={cfg.dedup.wait_seconds}, "
+                        f"url数量={len(links_with_parser)}"
+                    )
+                if await self.dedup_guard.wait_and_check(group_id):
+                    if cfg.admin.debug_mode:
+                        self.logger.debug(
+                            f"互斥等待后取消解析: group_id={group_id}"
+                        )
+                    return
+
+            for link, _ in links_with_parser:
+                self.dedup_guard.record_url_cooldown(group_id, link)
+
         if cfg.admin.debug_mode:
             self.logger.debug(
                 f"提取到 {len(links_with_parser)} 个可解析链接: "
                 f"{[link for link, _ in links_with_parser]}"
             )
 
-        sender_name, sender_id = self.message_sender.get_sender_info(event)
+        sender_name, sender_id = self.message_sender.get_sender_info(
+            event,
+            sender_name=cfg.message.forward_sender_name,
+        )
 
         timeout = aiohttp.ClientTimeout(total=Config.DEFAULT_TIMEOUT)
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -1088,5 +1185,6 @@ class VideoParserPlugin(Star):
                     translation_task=translation_task,
                     translation_metadata_list=translation_metadata_list,
                 )
+                self._stop_event_if_supported(event)
             finally:
                 await self._cancel_translation_task(translation_task)
