@@ -1266,6 +1266,7 @@ class ConfigManager:
                 admin_assist_enabled=self.bilibili.enable_admin_assist,
                 credential_path=self.bilibili.cookie_runtime_file,
                 hot_comment_count=bili_hc,
+                video_output_mode=self.bilibili.video_output_mode,
                 show_uid=self.bilibili.show_uid,
             )
             parsers.append(self.bilibili_parser)
