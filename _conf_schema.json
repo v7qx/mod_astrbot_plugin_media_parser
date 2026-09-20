@@ -13,7 +13,7 @@
                     "仅文本",
                     "仅富媒体"
                 ],
-                "default": "全部发送"
+                "default": "仅文本"
             },
             "douyin": {
                 "description": "抖音",
@@ -79,7 +79,7 @@
                     "仅文本",
                     "仅富媒体"
                 ],
-                "default": "全部发送"
+                "default": "关闭"
             },
             "toutiao": {
                 "description": "今日头条",
@@ -90,7 +90,7 @@
                     "仅文本",
                     "仅富媒体"
                 ],
-                "default": "全部发送"
+                "default": "关闭"
             },
             "xiaoheihe": {
                 "description": "小黑盒",
@@ -101,7 +101,7 @@
                     "仅文本",
                     "仅富媒体"
                 ],
-                "default": "全部发送"
+                "default": "关闭"
             },
             "xueqiu": {
                 "description": "雪球",
@@ -202,7 +202,7 @@
             "auto_parse": {
                 "description": "自动解析链接",
                 "type": "bool",
-                "default": true
+                "default": false
             },
             "reply_trigger": {
                 "description": "回复触发解析",
@@ -282,7 +282,7 @@
                     "show_title": {
                         "description": "显示标题",
                         "type": "bool",
-                        "default": true
+                        "default": false
                     },
                     "show_author": {
                         "description": "显示作者",
@@ -292,13 +292,13 @@
                     "show_timestamp": {
                         "description": "显示发布时间",
                         "type": "bool",
-                        "default": true
+                        "default": false
                     },
                     "show_original_link": {
                         "description": "显示原始链接",
                         "type": "bool",
                         "hint": "关闭后不在解析结果中重复展示原链接。",
-                        "default": true
+                        "default": false
                     },
                     "show_description": {
                         "description": "显示简介/正文",
@@ -361,13 +361,13 @@
                         "description": "显示视频大小",
                         "type": "bool",
                         "hint": "关闭后不在文本元数据中显示已探测到的视频大小。",
-                        "default": true
+                        "default": false
                     },
                     "max_description_length": {
                         "description": "简介/正文最大长度",
                         "type": "int",
                         "hint": "0 = 不截断；大于 0 时超过该字符数的简介/正文会截断并加省略号。",
-                        "default": 0
+                        "default": 300
                     },
                     "hide_redundant_twitter_title": {
                         "description": "隐藏 Twitter/X 冗余标题",
@@ -430,7 +430,7 @@
                     "enable": {
                         "description": "发送开场语",
                         "type": "bool",
-                        "default": true
+                        "default": false
                     },
                     "content": {
                         "description": "开场语内容",
@@ -464,7 +464,7 @@
                             "全部聚合",
                             "按条件聚合"
                         ],
-                        "default": "不聚合"
+                        "default": "按条件聚合"
                     },
                     "zip_command": {
                         "description": "旧归档命令（自动迁移）",
@@ -484,7 +484,7 @@
                                 "description": "图片数量",
                                 "type": "int",
                                 "hint": "图片总数达到该值时聚合；0 = 不按图片数触发",
-                                "default": 3
+                                "default": 4
                             },
                             "video_count": {
                                 "description": "视频数量",
@@ -496,13 +496,13 @@
                                 "description": "节点数量",
                                 "type": "int",
                                 "hint": "文本、图片和视频节点总数达到该值时聚合；0 = 不按节点数触发",
-                                "default": 5
+                                "default": 0
                             },
                             "text_length": {
                                 "description": "文本字符数",
                                 "type": "int",
                                 "hint": "最终渲染后的文本节点总字符数达到该值时聚合；0 = 不按文本长度触发。",
-                                "default": 0
+                                "default": 100
                             }
                         }
                     }
@@ -537,13 +537,13 @@
                 "description": "合并转发每批节点数",
                 "type": "int",
                 "hint": "0 = 不分批；NapCat/QQ 对超大合并转发不稳定时可调小。",
-                "default": 8
+                "default": 0
             },
             "direct_image_batch_size": {
                 "description": "非聚合图片每批数量",
                 "type": "int",
                 "hint": "0 = 一次发送全部图片。",
-                "default": 4
+                "default": 0
             },
             "video_pack_threshold": {
                 "description": "视频进入合并转发的阈值",
@@ -1101,7 +1101,7 @@
                 "description": "等待其他机器人秒数",
                 "type": "float",
                 "hint": "群聊解析前等待的时间；0 = 不等待。",
-                "default": 2
+                "default": 3
             },
             "url_cooldown_seconds": {
                 "description": "同链接冷却秒数",
