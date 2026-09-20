@@ -7,6 +7,7 @@ from astrbot.api.event import AstrMessageEvent
 from astrbot.api.message_components import Nodes, Plain, Image, Node, Reply, Video
 
 from ..logger import logger
+from ..downloader.utils import strip_media_prefixes
 
 from .node_builder import is_pure_image_gallery
 
@@ -97,6 +98,195 @@ class MessageSender:
                 sender_id = 10000
         return sender_name, sender_id
 
+    @staticmethod
+    def _plain_text(node: Plain) -> str:
+        for attr in ("text", "message", "content"):
+            value = getattr(node, attr, None)
+            if value:
+                return str(value)
+        return str(node)
+
+    @staticmethod
+    def _onebot_local_file(path: str) -> str:
+        value = str(path or "").strip()
+        if not value:
+            return ""
+        if value.lower().startswith(("http://", "https://", "file://")):
+            return value
+        try:
+            if Path(value).is_absolute():
+                return Path(value).resolve().as_uri()
+        except (OSError, ValueError):
+            pass
+        return value
+
+    @staticmethod
+    def _get_forward_image_file(metadata: dict, image_ordinal: int) -> str:
+        """返回第 N 个实际图片节点对应的 OneBot 文件引用。"""
+        video_urls = metadata.get("video_urls") or []
+        image_urls = metadata.get("image_urls") or []
+        image_modes = metadata.get("image_modes") or []
+        file_token_urls = metadata.get("file_token_urls") or []
+        use_fts = bool(metadata.get("use_file_token_service"))
+        seen = 0
+
+        for image_idx, url_list in enumerate(image_urls):
+            mode = (
+                image_modes[image_idx]
+                if image_idx < len(image_modes)
+                else ("local" if metadata.get("use_local_files") else "direct")
+            )
+            if mode == "skip" or not isinstance(url_list, list) or not url_list:
+                continue
+            image_url = str(url_list[0] or "").strip()
+            if not image_url:
+                continue
+            if seen != image_ordinal:
+                seen += 1
+                continue
+
+            file_idx = len(video_urls) + image_idx
+            if (
+                use_fts
+                and file_idx < len(file_token_urls)
+                and file_token_urls[file_idx]
+            ):
+                return str(file_token_urls[file_idx]).strip()
+            # NapCat 合并转发图片优先使用源 URL，避免容器本地路径不可见。
+            return image_url
+        return ""
+
+    @classmethod
+    def _get_forward_video_file(cls, metadata: dict, video_ordinal: int) -> str:
+        """返回第 N 个实际视频节点对应的 OneBot 文件引用。"""
+        video_urls = metadata.get("video_urls") or []
+        video_modes = metadata.get("video_modes") or []
+        file_paths = metadata.get("file_paths") or []
+        file_token_urls = metadata.get("file_token_urls") or []
+        use_fts = bool(metadata.get("use_file_token_service"))
+        seen = 0
+
+        for video_idx, url_list in enumerate(video_urls):
+            mode = (
+                video_modes[video_idx]
+                if video_idx < len(video_modes)
+                else ("local" if metadata.get("use_local_files") else "direct")
+            )
+            if mode == "skip" or not isinstance(url_list, list) or not url_list:
+                continue
+            video_url = str(url_list[0] or "").strip()
+            if not video_url:
+                continue
+            if seen != video_ordinal:
+                seen += 1
+                continue
+
+            if (
+                use_fts
+                and video_idx < len(file_token_urls)
+                and file_token_urls[video_idx]
+            ):
+                return str(file_token_urls[video_idx]).strip()
+
+            if (
+                mode == "local"
+                and video_idx < len(file_paths)
+                and file_paths[video_idx]
+            ):
+                local_ref = cls._onebot_local_file(file_paths[video_idx])
+                if local_ref:
+                    return local_ref
+
+            return strip_media_prefixes(video_url)
+        return ""
+
+    @staticmethod
+    def _build_onebot_segment(kind: str, value: Any) -> Optional[dict]:
+        value = str(value or "").strip()
+        if not value:
+            return None
+        if kind == "text":
+            return {"type": "text", "data": {"text": value}}
+        if kind in ("image", "video"):
+            return {"type": kind, "data": {"file": value}}
+        return None
+
+    def _build_onebot_forward_message_chunks(
+        self,
+        items: list[tuple[str, Any]],
+        sender_name: str,
+        sender_id: Any,
+    ) -> list[list[dict]]:
+        if not items:
+            return []
+        chunk_size = (
+            self.FORWARD_CHUNK_SIZE if self.FORWARD_CHUNK_SIZE > 0 else len(items)
+        )
+        chunk_size = max(1, chunk_size)
+        chunks = []
+        for start in range(0, len(items), chunk_size):
+            messages = []
+            for kind, value in items[start : start + chunk_size]:
+                segment = self._build_onebot_segment(kind, value)
+                if segment is None:
+                    continue
+                messages.append(
+                    {
+                        "type": "node",
+                        "data": {
+                            "name": sender_name,
+                            "uin": str(sender_id),
+                            "content": [segment],
+                        },
+                    }
+                )
+            if messages:
+                chunks.append(messages)
+        return chunks
+
+    async def _send_onebot_forward_items(
+        self,
+        event: AstrMessageEvent,
+        items: list[tuple[str, Any]],
+        sender_name: str,
+        sender_id: Any,
+    ) -> Optional[tuple[int, int, list[Exception]]]:
+        """NapCat/aiocqhttp 优先直调 OneBot 合并转发；不适用时返回 None。"""
+        if not items or event.get_platform_name() != "aiocqhttp":
+            return None
+        bot = getattr(event, "bot", None)
+        if bot is None:
+            return None
+
+        chunks = self._build_onebot_forward_message_chunks(
+            items,
+            sender_name,
+            sender_id,
+        )
+        if not chunks:
+            return None
+
+        expected = len(chunks)
+        succeeded = 0
+        errors: list[Exception] = []
+        for messages in chunks:
+            try:
+                if event.is_private_chat():
+                    await bot.send_private_forward_msg(
+                        user_id=int(event.get_sender_id()),
+                        messages=messages,
+                    )
+                else:
+                    await bot.send_group_forward_msg(
+                        group_id=int(event.get_group_id()),
+                        messages=messages,
+                    )
+                succeeded += 1
+            except Exception as exc:
+                errors.append(exc)
+                logger.warning(f"OneBot合并转发直调失败: {exc}")
+        return expected, succeeded, errors
+
     async def send_aggregated_results(
         self,
         event: AstrMessageEvent,
@@ -145,10 +335,12 @@ class MessageSender:
             flat_nodes = []
             direct_nodes = []
             aggregate_link_groups = []
+            onebot_item_groups = []
+            onebot_compatible = True
             total_videos = sum(
                 isinstance(node, Video)
-                for link_nodes in normal_link_nodes
-                for node in link_nodes
+                for meta in normal_metadata
+                for node in meta.get("link_nodes", [])
             )
             pack_videos = (
                 self.VIDEO_PACK_THRESHOLD > 0
@@ -163,34 +355,69 @@ class MessageSender:
                         content=[rendered_image],
                     )
                 )
-
-            for link_nodes in normal_link_nodes:
-                link_forward_nodes = []
-                if is_pure_image_gallery(link_nodes):
-                    texts = [node for node in link_nodes if isinstance(node, Plain)]
-                    images = [node for node in link_nodes if isinstance(node, Image)]
-                    for text in texts:
-                        link_forward_nodes.append(
-                            Node(name=sender_name, uin=sender_id, content=[text])
-                        )
-                    for image in images:
-                        link_forward_nodes.append(
-                            Node(name=sender_name, uin=sender_id, content=[image])
-                        )
+                rendered_ref = self._onebot_local_file(text_metadata_image)
+                if rendered_ref:
+                    onebot_item_groups.append([("image", rendered_ref)])
                 else:
-                    for node in link_nodes:
-                        if node is None:
-                            continue
-                        if isinstance(node, Video) and not pack_videos:
+                    onebot_compatible = False
+
+            for meta in normal_metadata:
+                link_nodes = meta.get("link_nodes") or []
+                metadata = meta.get("metadata") or {}
+                link_forward_nodes = []
+                link_forward_items = []
+                image_ordinal = 0
+                video_ordinal = 0
+
+                for node in link_nodes:
+                    if node is None:
+                        continue
+                    if isinstance(node, Plain):
+                        link_forward_nodes.append(
+                            Node(name=sender_name, uin=sender_id, content=[node])
+                        )
+                        link_forward_items.append(("text", self._plain_text(node)))
+                    elif isinstance(node, Image):
+                        link_forward_nodes.append(
+                            Node(name=sender_name, uin=sender_id, content=[node])
+                        )
+                        image_file = self._get_forward_image_file(
+                            metadata,
+                            image_ordinal,
+                        )
+                        image_ordinal += 1
+                        if image_file:
+                            link_forward_items.append(("image", image_file))
+                        else:
+                            onebot_compatible = False
+                    elif isinstance(node, Video):
+                        if not pack_videos:
                             direct_nodes.append(node)
+                            video_ordinal += 1
                             continue
                         link_forward_nodes.append(
                             Node(name=sender_name, uin=sender_id, content=[node])
                         )
+                        video_file = self._get_forward_video_file(
+                            metadata,
+                            video_ordinal,
+                        )
+                        video_ordinal += 1
+                        if video_file:
+                            link_forward_items.append(("video", video_file))
+                        else:
+                            onebot_compatible = False
+                    else:
+                        link_forward_nodes.append(
+                            Node(name=sender_name, uin=sender_id, content=[node])
+                        )
+                        onebot_compatible = False
 
                 if link_forward_nodes:
                     aggregate_link_groups.append(link_forward_nodes)
+                    onebot_item_groups.append(link_forward_items)
 
+            onebot_items = []
             for group_idx, link_forward_nodes in enumerate(aggregate_link_groups):
                 flat_nodes.extend(link_forward_nodes)
                 if group_idx < len(aggregate_link_groups) - 1:
@@ -202,7 +429,32 @@ class MessageSender:
                         )
                     )
 
-            if flat_nodes:
+            non_empty_onebot_groups = [group for group in onebot_item_groups if group]
+            for group_idx, group in enumerate(non_empty_onebot_groups):
+                onebot_items.extend(group)
+                if group_idx < len(non_empty_onebot_groups) - 1:
+                    onebot_items.append(("text", separator))
+
+            used_onebot = False
+            if flat_nodes and onebot_compatible and onebot_items:
+                onebot_result = await self._send_onebot_forward_items(
+                    event,
+                    onebot_items,
+                    sender_name,
+                    sender_id,
+                )
+                if onebot_result is not None:
+                    onebot_expected, onebot_succeeded, onebot_errors = onebot_result
+                    # 全部失败时回退 AstrBot Nodes；部分成功时避免重复重发已成功块。
+                    if onebot_succeeded > 0:
+                        expected += onebot_expected
+                        succeeded += onebot_succeeded
+                        errors.extend(onebot_errors)
+                        used_onebot = True
+                    elif onebot_errors:
+                        logger.warning("OneBot合并转发全部失败，回退AstrBot Nodes")
+
+            if flat_nodes and not used_onebot:
                 chunk_size = (
                     self.FORWARD_CHUNK_SIZE
                     if self.FORWARD_CHUNK_SIZE > 0
