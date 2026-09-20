@@ -3,7 +3,7 @@
 import logging
 
 
-_PLUGIN_TAG = "astrbot_plugin_media_parser"
+_PLUGIN_TAG = "mod_astrbot_plugin_media_parser"
 
 
 class _PluginTagFilter(logging.Filter):
@@ -40,5 +40,5 @@ try:
 
     logger = _configure_plugin_logger(_astrbot_logger)
 except ImportError:
-    logger = logging.getLogger("astrbot_plugin_media_parser")
+    logger = logging.getLogger("mod_astrbot_plugin_media_parser")
     logger.addFilter(_PluginTagFilter())
