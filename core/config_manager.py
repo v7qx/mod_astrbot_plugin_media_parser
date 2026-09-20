@@ -1551,11 +1551,6 @@ class ConfigManager:
 
         if "auto_pack" in message and not current_mode:
             legacy_auto_pack = cls._coerce_bool(message.get("auto_pack"))
-            packing["mode"] = (
-                AGGREGATION_MODE_CONDITIONAL
-                if legacy_auto_pack
-                else AGGREGATION_MODE_NONE
-            )
             thresholds = cls._as_dict(packing.get("thresholds"))
             thresholds.setdefault(
                 "image_count",
@@ -1576,6 +1571,24 @@ class ConfigManager:
                 ),
             )
             thresholds.setdefault("node_count", 0)
+
+            if legacy_auto_pack:
+                # 旧 personal 语义：三个智能阈值都为 0 时表示始终打包，
+                # 不能迁成“按条件聚合 + 全 0”，否则会变成永不聚合。
+                legacy_thresholds = (
+                    thresholds.get("image_count", 0),
+                    thresholds.get("video_count", 0),
+                    thresholds.get("text_length", 0),
+                    thresholds.get("node_count", 0),
+                )
+                packing["mode"] = (
+                    AGGREGATION_MODE_ALL
+                    if all(int(value or 0) <= 0 for value in legacy_thresholds)
+                    else AGGREGATION_MODE_CONDITIONAL
+                )
+            else:
+                packing["mode"] = AGGREGATION_MODE_NONE
+
             packing["thresholds"] = thresholds
             changed = True
 
